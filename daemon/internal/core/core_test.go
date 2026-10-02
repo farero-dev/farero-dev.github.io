@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -546,5 +547,62 @@ func TestPolicyOverrideChangesToolList(t *testing.T) {
 	u.conn.Send(ipc.TypePolicySet, "p2", ipc.PolicySet{Plugin: "dev", Tool: "destroy_sim", Level: "auto"})
 	if m := u.next(ipc.TypeError); !strings.Contains(string(m.Data), "every time") {
 		t.Fatalf("expected refusal, got %s", m.Data)
+	}
+}
+
+type failingConnector struct{}
+
+func (failingConnector) Connect(context.Context, map[string]string, func(ipc.PluginPrompt)) error {
+	return errors.New("device flow expired")
+}
+func (failingConnector) Disconnect(context.Context) error { return nil }
+
+type optionConnector struct{ reconnects int }
+
+func (o *optionConnector) Connect(context.Context, map[string]string, func(ipc.PluginPrompt)) error {
+	return nil
+}
+func (o *optionConnector) Disconnect(context.Context) error { return nil }
+func (o *optionConnector) Reconnect(context.Context) error {
+	o.reconnects++
+	return errors.New("not connected")
+}
+
+func TestPluginConnectFailureIsReported(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	h.core.connectors = map[string]Connector{"github": failingConnector{}}
+	u := h.ui()
+	u.conn.Send(ipc.TypePluginConnect, "c", ipc.PluginConnect{Plugin: "github"})
+	p, _ := ipc.Decode[model.PluginState](u.next(ipc.TypePluginUpdated))
+	if p.Plugin != "github" || p.Status != model.PluginError || !strings.Contains(p.Error, "device flow expired") {
+		t.Fatalf("plugin state: %+v", p)
+	}
+}
+
+func TestSetOptionOnDisconnectedPlugin(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	oc := &optionConnector{}
+	h.core.connectors = map[string]Connector{"github": oc}
+	u := h.ui()
+	u.conn.Send(ipc.TypePluginSetOption, "o", ipc.PluginSetOption{Plugin: "github", Key: "read_only", Value: "true"})
+	p, _ := ipc.Decode[model.PluginState](u.next(ipc.TypePluginUpdated))
+	if p.Options["read_only"] != "true" || oc.reconnects != 0 {
+		t.Fatalf("state %+v, reconnects %d", p, oc.reconnects)
+	}
+}
+
+func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	big := strings.Repeat("x", 20000)
+	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/a", "content": big}, 1)
+	u.answer(u.approval().ID, model.AnswerDeny)
+	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
+	if len(c.Input) > 200 || !strings.Contains(string(c.Input), "bytes") {
+		t.Fatalf("broadcast input not trimmed: %d bytes", len(c.Input))
+	}
+	stored := h.lastCall()
+	if len(stored.Input) < 20000 {
+		t.Fatalf("stored input was trimmed: %d", len(stored.Input))
 	}
 }

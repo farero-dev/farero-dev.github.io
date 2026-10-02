@@ -47,9 +47,13 @@ func (c *Core) pluginStates(ctx context.Context) []model.PluginState {
 			continue
 		}
 		c.mu.Lock()
-		if e := c.pluginErr[name]; e != "" && p.Status == model.PluginConnected {
-			p.Status = model.PluginError
+		if e := c.pluginErr[name]; e != "" {
+			// Keep "expired" as is; a failed first connect or a failing
+			// upstream shows as an error with its reason.
 			p.Error = e
+			if p.Status != model.PluginExpired {
+				p.Status = model.PluginError
+			}
 		}
 		c.mu.Unlock()
 		out = append(out, p)
@@ -184,6 +188,9 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		}
 		// OAuth can take minutes; run it in the background and report
 		// progress through plugin.prompt / plugin.updated broadcasts.
+		c.mu.Lock()
+		delete(c.pluginErr, r.Plugin)
+		c.mu.Unlock()
 		go func() {
 			err := conn.Connect(context.WithoutCancel(ctx), r.Params, func(p ipc.PluginPrompt) {
 				p.Plugin = r.Plugin
@@ -210,6 +217,9 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 			}
 		}
 		c.plugins.Remove(r.Plugin)
+		c.mu.Lock()
+		delete(c.pluginErr, r.Plugin)
+		c.mu.Unlock()
 		p, _ := c.store.Plugin(ctx, r.Plugin)
 		p.Status = model.PluginDisconnected
 		p.AccountLabel = ""
@@ -235,7 +245,10 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		if err := c.store.SavePlugin(ctx, p); err != nil {
 			return "", nil, err
 		}
-		if rc, ok := c.connectors[r.Plugin].(interface{ Reconnect(context.Context) error }); ok {
+		// Apply the option now only if the plugin is connected; otherwise it
+		// takes effect on the next connect.
+		_, live := c.plugins.Get(r.Plugin)
+		if rc, ok := c.connectors[r.Plugin].(interface{ Reconnect(context.Context) error }); ok && live {
 			if err := rc.Reconnect(ctx); err != nil {
 				return "", nil, err
 			}

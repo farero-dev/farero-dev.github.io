@@ -472,12 +472,20 @@ func (c *Claude) Apply(ctx context.Context) (ipc.AgentCfgStatus, error) {
 	if err != nil {
 		return ipc.AgentCfgStatus{}, err
 	}
+	written, _ := os.ReadFile(c.settingsPath())
 	c.run(ctx, cli, "mcp", "remove", ServerName, "--scope", "user")
 	if out, err := c.run(ctx, cli, "mcp", "add-json", ServerName, c.serverJSON(), "--scope", "user"); err != nil {
 		return ipc.AgentCfgStatus{}, fmt.Errorf("claude mcp add-json: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	st := c.Status(ctx)
 	st.BackupPath = backup
+	// The claude CLI may rewrite settings.json itself while it runs (M0:
+	// key order and "model" values changed). Say so, since the confirmed
+	// diff did not show it.
+	if now, err := os.ReadFile(c.settingsPath()); err == nil && !bytes.Equal(now, written) {
+		st.Message = "Claude Code CLI가 등록 직후 settings.json을 스스로 다시 썼습니다(키 순서나 model 값 같은 Claude Code 자체 변경). farero 항목은 " +
+			map[bool]string{true: "그대로 들어 있습니다.", false: "일부 빠졌습니다. 다시 등록해 주세요."}[st.HooksInstalled && st.AllowInstalled]
+	}
 	return st, nil
 }
 

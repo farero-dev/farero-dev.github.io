@@ -279,7 +279,27 @@ func (c *Core) logCall(ctx context.Context, call model.Call) {
 		return
 	}
 	call.ID = id
-	c.hub.broadcast(ipc.TypeCallLogged, call)
+	c.hub.broadcast(ipc.TypeCallLogged, trimForBroadcast(call))
+}
+
+// Broadcast limits: call.logged tells the app that something happened (for
+// the character and live views); the full row stays in the log.
+const (
+	broadcastInputLimit  = 8 << 10
+	broadcastResultLimit = 2 << 10
+)
+
+func trimForBroadcast(c model.Call) model.Call {
+	if len(c.Input) > broadcastInputLimit {
+		c.Input = mustJSON(fmt.Sprintf("(입력 %d bytes, 로그 검색에서 전체 보기)", len(c.Input)))
+	}
+	c.ResultText = store.TruncateUTF8(c.ResultText, broadcastResultLimit)
+	return c
+}
+
+func mustJSON(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func joinReasons(r []string) string { return strings.Join(r, ",") }

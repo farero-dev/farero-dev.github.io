@@ -102,3 +102,7 @@
 ### 앱 2단계 (서브 에이전트)
 - 설정 창(승인 정책·일반·Claude Code 등록과 diff 확인, 다른 앱 PermissionRequest 훅 경고), 플러그인 창(device code 표시, Gmail GCP 안내 시트, GitHub 읽기 전용), 로그 검색(필터·상세·세션 삭제), 노치 세션 삭제, 설정 도우미, 업데이트 확인(GitHub Releases, 404는 정상), 앱·데몬 버전 불일치 시 데몬 재등록. 테스트 111개 통과.
 - 남은 데몬 수정: (1) 처음 연결 실패 이유가 `plugin.updated`에 실리지 않음, (2) 미연결 상태 `plugin.set_option`이 재연결 실패로 오류, (3) `call.logged` 알림에 큰 입력이 그대로 실림, (4) `claude mcp add-json`이 적용 직후 settings.json을 다시 고치는 점 안내.
+
+### CI 수정과 데몬 마무리
+- CI 실패 원인: `macos-15` 러너의 이전 Xcode(Swift)에서 `SMAppService`가 Sendable이 아니라서 `try await service.unregister()`가 동시성 오류(로컬 Swift 6.3에서는 안 남). 비격리 정적 함수 안에서 서비스 객체를 만들어 해제하도록 고쳤다. 워크플로에 툴체인 버전 출력 단계를 추가했다.
+- 데몬: 처음 연결 실패 이유를 `plugin.updated`의 `error`로 전달(상태 `error`), 미연결 플러그인의 `plugin.set_option`은 저장·알림만 하고 재연결하지 않음, `call.logged` 알림은 입력 8KB·결과 2KB로 줄임(저장된 로그는 전체), Claude CLI가 등록 직후 settings.json을 다시 쓰면 상태 메시지로 알림. 테스트 추가.

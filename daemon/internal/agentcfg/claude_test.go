@@ -246,3 +246,27 @@ func TestInvalidSettingsAreNotTouched(t *testing.T) {
 		t.Fatal("invalid file was modified")
 	}
 }
+
+func TestApplyReportsCLIRewrite(t *testing.T) {
+	c, f := setup(t, userSettings)
+	inner := f.run
+	c.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		out, err := inner(ctx, name, args...)
+		if len(args) > 1 && args[1] == "add-json" {
+			// Emulate the CLI rewriting settings.json (reordering keys).
+			b, _ := os.ReadFile(c.settingsPath())
+			var v map[string]any
+			json.Unmarshal(b, &v)
+			nb, _ := json.Marshal(v)
+			os.WriteFile(c.settingsPath(), nb, 0o644)
+		}
+		return out, err
+	}
+	st, err := c.Apply(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(st.Message, "다시 썼습니다") || !strings.Contains(st.Message, "그대로") {
+		t.Fatalf("message: %q", st.Message)
+	}
+}
