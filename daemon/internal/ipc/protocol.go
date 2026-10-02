@@ -175,6 +175,45 @@ type Settings struct {
 	UpdateCheck      bool `json:"update_check"`
 }
 
+// AgentCfgStatus reports whether farero is registered with an agent (F-06).
+type AgentCfgStatus struct {
+	Agent          string `json:"agent"`           // "claude"
+	CLIFound       bool   `json:"cli_found"`       // the agent's CLI was found
+	CLIPath        string `json:"cli_path"`        // where
+	Version        string `json:"version"`         // e.g. "2.1.287"
+	MinVersion     string `json:"min_version"`     // "2.1.203" (Q53)
+	VersionOK      bool   `json:"version_ok"`      // Version >= MinVersion
+	SettingsPath   string `json:"settings_path"`   // ~/.claude/settings.json
+	HooksInstalled bool   `json:"hooks_installed"` // every hook event is registered
+	AllowInstalled bool   `json:"allow_installed"` // permissions.allow has mcp__farero__*
+	MCPInstalled   bool   `json:"mcp_installed"`   // user-scope server "farero" exists
+	HookPath       string `json:"hook_path"`       // this farero-hook's path
+	StalePath      bool   `json:"stale_path"`      // installed entries point at another path
+	GatewayURL     string `json:"gateway_url"`
+	BackupPath     string `json:"backup_path,omitempty"` // set by apply/remove
+	Message        string `json:"message,omitempty"`
+}
+
+// FileChange is one file the installer will rewrite. The app shows a diff
+// of Before and After and asks the user to confirm (coucou 방식).
+type FileChange struct {
+	Path   string `json:"path"`
+	Before string `json:"before"`
+	After  string `json:"after"`
+}
+
+// AgentCfgPlan is what apply would do.
+type AgentCfgPlan struct {
+	Agent    string       `json:"agent"`
+	Changes  []FileChange `json:"changes"`
+	Commands []string     `json:"commands"` // CLI commands run after the files are written
+}
+
+// AgentRef names an agent.
+type AgentRef struct {
+	Agent string `json:"agent"`
+}
+
 // ErrorData is the payload of an error reply.
 type ErrorData struct {
 	Message string `json:"message"`

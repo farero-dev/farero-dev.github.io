@@ -52,3 +52,13 @@
 - `farero-hook`(훅·헤더 헬퍼), `farerod`(데몬), `farero-devctl`(앱 대신 쓰는 개발용 UI 클라이언트)을 만들었다. 가짜 플러그인은 `-tags farero_dev` 빌드에만 들어간다.
 - `core` 통합 테스트 14개: 실제 소켓·게이트웨이·MCP 클라이언트로 M4 완료 기준(자동 허용 / 승인 / 세션 허용 / 세션 허용 불가 / 오염 / 세션 불명 / 앱 꺼짐 자동 거부 / 차단 도구 숨김 / 시간 초과 / 에이전트 취소 / 정책 재정의)을 확인. `-race -count=5` 통과.
 - **실제 Claude Code 2.1.287로 통합 실행**(`claude -p`, `--setting-sources project`, 사용자 설정과 분리): 9개 호출이 모두 세션에 연결됨(세션 불명 0건). 기록된 판단은 순서대로 auto_allowed → user_allowed(allow_session) → session_allowed → auto_allowed(오염 소스) → user_allowed(policy,tainted: 세션 허용 무효, 버튼 숨김) → user_allowed(destroy, 세션 허용 불가) → Bash 2회 모두 다시 물음(오염 세션, Q39) → 업스트림 실패 기록.
+
+### 에이전트 설정 자동 등록 (F-06)
+- `agentcfg`: Claude Code 사용자 `settings.json`에 훅 9종(`timeout: 660`)과 `permissions.allow`의 `mcp__farero__*`를 넣고, 게이트웨이는 `claude mcp add-json farero … --scope user`(서버별 `timeout: 660000`, `headersHelper`)로 등록한다. 키 순서를 보존하고, `&&` 같은 문자를 이스케이프하지 않으며(`\u0026` 방지), 쓰기 전에 `backups/`에 원본을 저장한다. 제거는 farero 항목만 지운다. 앱 위치가 바뀌면 시작할 때 경로만 고치고 알림 문구를 남긴다(Q63).
+- `farerod`에 `agentcfg.status/plan/apply/remove` 요청을 연결했다. `FARERO_CLAUDE_CONFIG_DIR`로 대상 설정 폴더를 바꿀 수 있고, `--dev`에서 이 값이 없으면 경로 자동 수정을 하지 않는다(실제 `~/.claude` 보호).
+- 실제 `claude` CLI(임시 `CLAUDE_CONFIG_DIR`)로 확인: 등록 후 `claude mcp get farero`가 "✔ Connected, Timeout 660000ms"(헤더 헬퍼 인증 통과), 제거 후 farero 항목만 빠짐.
+- 확인한 사실: `claude` CLI(`mcp add-json`/`mcp get`)가 실행 중에 `settings.json`을 스스로 다시 쓴다(키 순서 변경, `model: "opus"` → `"opus[1m]"`). 그래서 계획(diff)과 적용 사이에 파일이 바뀔 수 있고, 적용은 그 시점의 파일을 다시 읽어 처리한다.
+- `docs/ipc.md`: 소켓 규약 문서.
+
+### 작업 방식 메모
+- CPU 사용량이 커서(서브 에이전트 두 개의 `swift build`와 `go build`가 동시에 돌았음) 작업을 멈췄다가, 무거운 작업은 하나씩 순서대로 진행하기로 했다. 빌드 병렬도도 제한한다(`go build -p 2`, `swift build -j 2`).

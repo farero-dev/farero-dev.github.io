@@ -16,6 +16,3 @@ func connectors(log *slog.Logger, st *store.Store, secrets secret.Store) map[str
 
 // restorePlugins reconnects plugins that were connected before a restart.
 func restorePlugins(ctx context.Context, log *slog.Logger, c *core.Core) {}
-
-// registerAgentConfig wires the agent config installer (F-06).
-func registerAgentConfig(c *core.Core, log *slog.Logger) {}

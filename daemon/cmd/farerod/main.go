@@ -88,7 +88,7 @@ func run(log *slog.Logger, dev bool) error {
 	} else {
 		log.Info("gateway listening", "url", c.GatewayInfo().URL)
 	}
-	registerAgentConfig(c, log)
+	registerAgentConfig(ctx, c, log, dev)
 
 	l, err := ipc.Listen(paths.Socket())
 	if err != nil {

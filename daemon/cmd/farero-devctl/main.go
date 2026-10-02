@@ -5,6 +5,7 @@
 //	farero-devctl watch [-answer allow|allow_session|deny]
 //	farero-devctl log [-q text] [-n 20]
 //	farero-devctl policy
+//	farero-devctl agentcfg status|plan|apply|remove
 package main
 
 import (
@@ -70,6 +71,13 @@ func main() {
 	case "policy":
 		conn.Send(ipc.TypePolicyGet, "p", nil)
 		printReply(conn, "p")
+	case "agentcfg":
+		op := "status"
+		if len(args) > 0 {
+			op = args[0]
+		}
+		conn.Send("agentcfg."+op, "a", ipc.AgentRef{Agent: "claude"})
+		printReply(conn, "a")
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command", cmd)
 		os.Exit(2)
