@@ -185,3 +185,16 @@ func TestPolicyOverridesAndPlugins(t *testing.T) {
 		t.Fatalf("plugin: %+v", p)
 	}
 }
+
+func TestCallFilterAcceptsEmptyDates(t *testing.T) {
+	var f CallFilter
+	if err := json.Unmarshal([]byte(`{"query":"x","from":"","to":null,"limit":5}`), &f); err != nil {
+		t.Fatal(err)
+	}
+	if f.Query != "x" || !f.From.IsZero() || !f.To.IsZero() || f.Limit != 5 {
+		t.Fatalf("%+v", f)
+	}
+	if err := json.Unmarshal([]byte(`{"from":"2026-10-02T09:00:00+09:00"}`), &f); err != nil || f.From.IsZero() {
+		t.Fatalf("%+v %v", f, err)
+	}
+}

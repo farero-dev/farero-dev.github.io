@@ -55,6 +55,11 @@ func TestAnswerAndOrder(t *testing.T) {
 	if r := <-results; r.Outcome != Answered || r.Answer != model.AnswerAllowSession {
 		t.Fatalf("got %+v", r)
 	}
+	n.mu.Lock()
+	if len(n.cancelled) != 1 || n.cancelled[0] != a1.ID+":answered" {
+		t.Fatalf("answer must be broadcast as cancelled/answered: %v", n.cancelled)
+	}
+	n.mu.Unlock()
 	b.Respond(a2.ID, model.AnswerDeny)
 	if r := <-results; r.Answer != model.AnswerDeny {
 		t.Fatalf("got %+v", r)

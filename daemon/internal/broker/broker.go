@@ -189,11 +189,16 @@ func (b *Broker) Respond(id, answer string) error {
 	if ok {
 		b.removeLocked(id)
 	}
+	notify := b.notify
 	b.mu.Unlock()
 	if !ok {
 		return ErrUnknownApproval
 	}
 	p.ch <- Result{Outcome: Answered, Answer: answer}
+	// Other UI clients still show the card; tell them it is settled.
+	if notify != nil {
+		notify.ApprovalCancelled(id, "answered")
+	}
 	return nil
 }
 

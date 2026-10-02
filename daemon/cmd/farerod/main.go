@@ -8,9 +8,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -29,6 +31,9 @@ var version = "dev"
 // keychainService is the Keychain service name for farerod's items.
 const keychainService = "dev.farero.farerod"
 
+// launchAgentLabel is the LaunchAgent label (app/Resources/LaunchAgents).
+const launchAgentLabel = "dev.farero.farerod"
+
 func main() {
 	dev := flag.Bool("dev", false, "development mode: file secret store (and the fake plugin in farero_dev builds)")
 	debug := flag.Bool("debug", false, "debug logging")
@@ -42,7 +47,7 @@ func main() {
 	if *debug {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	log := slog.New(slog.NewTextHandler(logOutput(), &slog.HandlerOptions{Level: level}))
 	if err := run(log, *dev); err != nil {
 		log.Error("farerod exiting", "err", err)
 		os.Exit(1)
@@ -113,6 +118,33 @@ func run(log *slog.Logger, dev bool) error {
 	c.Shutdown(sctx)
 	log.Info("farerod stopped")
 	return nil
+}
+
+// logOutput is stderr, or ~/Library/Logs/Farero/farerod.log when launchd
+// runs farerod as the app's LaunchAgent (stderr goes nowhere there). The
+// file is started over when it grows past 10 MB.
+func logOutput() io.Writer {
+	if os.Getenv("XPC_SERVICE_NAME") != launchAgentLabel {
+		return os.Stderr
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return os.Stderr
+	}
+	dir := filepath.Join(home, "Library", "Logs", "Farero")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return os.Stderr
+	}
+	path := filepath.Join(dir, "farerod.log")
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if fi, err := os.Stat(path); err == nil && fi.Size() > 10<<20 {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(path, flags, 0o600)
+	if err != nil {
+		return os.Stderr
+	}
+	return f
 }
 
 func secretStore(dev bool) secret.Store {

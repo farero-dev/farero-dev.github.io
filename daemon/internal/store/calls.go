@@ -54,10 +54,38 @@ type CallFilter struct {
 	Tool      string    `json:"tool"`
 	Decision  string    `json:"decision"`
 	Kind      string    `json:"kind"`
-	From      time.Time `json:"from"`
-	To        time.Time `json:"to"`
+	From      time.Time `json:"from,omitzero"`
+	To        time.Time `json:"to,omitzero"`
 	Limit     int       `json:"limit"`
 	Offset    int       `json:"offset"`
+}
+
+// UnmarshalJSON accepts "" (and null) for from/to, which clients send for
+// "no bound".
+func (f *CallFilter) UnmarshalJSON(b []byte) error {
+	type plain CallFilter
+	var raw struct {
+		plain
+		From any `json:"from"`
+		To   any `json:"to"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*f = CallFilter(raw.plain)
+	parse := func(v any) (time.Time, error) {
+		s, _ := v.(string)
+		if s == "" {
+			return time.Time{}, nil
+		}
+		return time.Parse(time.RFC3339Nano, s)
+	}
+	var err error
+	if f.From, err = parse(raw.From); err != nil {
+		return err
+	}
+	f.To, err = parse(raw.To)
+	return err
 }
 
 // QueryCalls searches the audit log, newest first.

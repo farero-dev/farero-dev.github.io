@@ -40,7 +40,7 @@ func (c *Core) pluginStates(ctx context.Context) []model.PluginState {
 			names = append(names, name)
 		}
 	}
-	var out []model.PluginState
+	out := []model.PluginState{}
 	for _, name := range names {
 		p, err := c.store.Plugin(ctx, name)
 		if err != nil {

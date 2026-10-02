@@ -78,3 +78,23 @@
 - 실제 메타데이터 확인(curl): Railway는 `mcp.railway.com` → `backboard.railway.com`(DCR `/oauth/register`, device `/oauth/device/auth`, S256). Resend는 리소스 식별자가 `https://mcp.resend.com`(루트)이고 MCP 엔드포인트는 `/mcp`라서 둘을 분리했다(버그 수정). `client_id_metadata_document_supported: true`. GitHub MCP의 리소스는 `https://api.githubcopilot.com/mcp`, 인증 서버 `https://github.com/login/oauth`.
 - 아직 못 한 것: 실제 계정으로 연결(M0-4). GitHub OAuth App(`farero-dev` 조직, device flow 켜기)의 client ID가 필요하다(`-X main.githubClientID=…` 또는 `FARERO_GITHUB_CLIENT_ID`).
 - 테스트: 가짜 OAuth 서버로 loopback(PKCE·resource·state 위조 거부), device flow(authorization_pending 후 성공), 갱신(refresh token 교체·저장, 실패 시 만료 콜백 1회), 가짜 Gmail API, SDK로 띄운 가짜 MCP 서버로 원격 플러그인.
+
+### 앱 1단계 (`app/`, 서브 에이전트)
+- SwiftPM 패키지: `FareroCore`(Foundation만: IPC 클라이언트, 모델, 상태 리듀서, 캐릭터 상태 결정, 노치 계산), `Farero`(AppKit/SwiftUI 메뉴바 앱), 테스트 77개 통과.
+- IPC: POSIX 소켓을 전용 스레드에서 읽고, 줄 단위로 나누고(수 MB 줄 처리), 끊기면 1초마다 재연결하며 스냅샷으로 화면을 다시 만든다.
+- 노치 패널: 포커스를 뺏지 않는 `NSPanel`(`.nonactivatingPanel`, `canBecomeKey=false`). 축소 상태는 노치 양옆에 22pt 캐릭터와 세션 수, 펼치면 세션 목록·현재 도구·터미널 버튼, 승인 카드는 도구·세션·이유·전체 입력·카운트다운·버튼 3개. 노치가 없는 화면은 상단 가운데.
+- 단축키: Carbon `RegisterEventHotKey`(손쉬운 사용 권한 불필요). 승인 카드가 있을 때만 ⌃⌥Y 허용 / ⌃⌥S 세션 허용 / ⌃⌥N 거부.
+- 캐릭터 상태 결정: 연결 끊김 > 승인 필요 > 허용함(1.5초) > 거부함(1.5초) > 오류(3초) > 조심 > 여럿 작업 중 > 작업 중 > 생각 중 > 인사(2초) > 입력 대기 > 잠듦. 터미널 프롬프트로 넘어간 `waiting_approval` 세션은 "입력 대기"로 보이게 고쳤다.
+- 실제 데몬으로 확인: 연결·스냅샷, 캐릭터 전환, 축소·확장·승인 카드 화면, 거부 시 게이트웨이 오류 문구, 훅 취소 시 카드 제거, 데몬 재시작 후 1초 안에 재연결.
+- 확인 못 한 것: 단축키 실제 키 입력(손쉬운 사용 권한 없음), Terminal.app 점프, SMAppService 등록(번들 필요), 메뉴 창들(포커스를 뺏어서 사용자 작업 방해 방지).
+- 명세와 다른 점: 7.5MB 같은 큰 입력은 카드에 앞 256KB만 보이고 "전체 복사" 버튼을 둔다(메모리 1.4GB → 144MB). 입력 JSON은 키를 정렬해 보여 준다.
+
+### 앱 제안으로 바꾼 데몬
+- 한 UI가 승인에 답하면 `approval.cancelled`(reason `answered`)를 모든 UI에 보낸다.
+- 스냅샷 `plugins`가 `null`이 되지 않게 했다. 쓰지 않는 `gateway.status` 상수를 지웠다.
+- `log.query`의 `from`/`to`가 `""`나 `null`이어도 받는다.
+
+### 배포 빌드 (`scripts/build.sh`)
+- `scripts/build.sh 0.1.0-dev` 첫 실행 성공(31.6초, `JOBS=2`). Farero·farerod·farero-hook 모두 `x86_64 arm64`, ad-hoc 서명 검증 통과(`--strict`), Info.plist 버전 치환, LaunchAgent plist(`BundleProgram Contents/MacOS/farerod`), x86_64 쪽도 Rosetta로 실행 확인, zip 약 15MB, farerod는 시스템 프레임워크만 링크.
+- GitHub Actions: `ci.yml`(develop 푸시 시 Go·Swift 테스트), `release.yml`(`v*` 태그 → Universal 빌드 → Releases). GitHub OAuth App client ID는 저장소 변수 `FARERO_GITHUB_CLIENT_ID`로 넣는다.
+- farerod는 LaunchAgent로 실행될 때 `~/Library/Logs/Farero/farerod.log`에 로그를 남긴다(10MB 넘으면 새로 시작).

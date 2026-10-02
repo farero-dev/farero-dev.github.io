@@ -120,7 +120,7 @@
 | `session.updated` | Session | 세션 상태·현재 도구·오염 변경 |
 | `session.removed` | `{"session_id"}` | 세션 삭제됨 |
 | `approval.request` | Approval | 승인 카드 추가(도착 순서대로 쌓기) |
-| `approval.cancelled` | `{"approval_id","reason":"timeout"\|"cancelled"}` | 카드 거두기 |
+| `approval.cancelled` | `{"approval_id","reason":"timeout"\|"cancelled"\|"answered"}` | 카드 거두기. `answered`는 다른 앱(또는 같은 앱)이 이미 답했다는 뜻 |
 | `call.logged` | Call | 감사 로그에 한 줄 추가됨(오류 캐릭터 상태 등에 사용) |
 | `plugin.updated` | PluginState | 플러그인 연결 상태 변경 |
 | `plugin.prompt` | `{"plugin","user_code","url","expires_at"}` | OAuth 진행 중 사용자가 할 일(device code 입력, 브라우저 열기) |
@@ -130,7 +130,7 @@
 | type | data | 답장 |
 |---|---|---|
 | `approval.response` | `{"approval_id","answer":"allow"\|"allow_session"\|"deny"}` | `ok` 또는 `error`(이미 끝난 카드) |
-| `log.query` | `{"query","session_id","agent","plugin","tool","decision","kind","from","to","limit","offset"}` (모두 선택) | `log.result`: `[Call]`. `query`는 3글자 이상이면 전문 검색, 2글자 이하면 부분 일치 |
+| `log.query` | `{"query","session_id","agent","plugin","tool","decision","kind","from","to","limit","offset"}` (모두 선택. `from`/`to`는 RFC 3339 문자열이고, 비우려면 빼거나 `""`) | `log.result`: `[Call]`. `query`는 3글자 이상이면 전문 검색, 2글자 이하면 부분 일치. `limit` 기본 200, 최대 1000 |
 | `policy.get` | 없음 | `policy.state`: `[{"plugin","tool","level","no_session","taint","destructive","default_level","overridden"}]` |
 | `policy.set` | `{"plugin","tool","level":"auto"\|"ask"\|"block"\|""}` | `policy.state`. `""`는 기본값으로 되돌림. `no_session` 도구를 `auto`로 바꾸려 하면 `error` |
 | `session.delete` | `{"session_id"}` | `ok`. 모든 앱에 `session.removed`를 보냄 |

@@ -38,7 +38,6 @@ const (
 	TypeApprovalResponse  = "approval.response"
 	TypeApprovalCancelled = "approval.cancelled"
 	TypeCallLogged        = "call.logged"
-	TypeGatewayStatus     = "gateway.status"
 	TypePluginUpdated     = "plugin.updated"
 	TypeLogQuery          = "log.query"
 	TypeLogResult         = "log.result"
