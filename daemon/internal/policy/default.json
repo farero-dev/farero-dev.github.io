@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "comment": "farero default tool classification. Tools that are not listed are never exposed. level: auto | ask | block. no_session: approval required every time (the user cannot lift it). taint: reading this marks the session as tainted. read_only defaults to level == auto.",
+  "plugins": {
+    "github": {
+      "tools": {
+        "get_me": {"level": "auto"},
+        "get_team_members": {"level": "auto"},
+        "get_teams": {"level": "auto"},
+        "get_commit": {"level": "auto", "taint": true},
+        "get_file_contents": {"level": "auto", "taint": true},
+        "get_latest_release": {"level": "auto"},
+        "get_release_by_tag": {"level": "auto"},
+        "get_tag": {"level": "auto"},
+        "list_branches": {"level": "auto"},
+        "list_commits": {"level": "auto"},
+        "list_releases": {"level": "auto"},
+        "list_repository_collaborators": {"level": "auto"},
+        "list_tags": {"level": "auto"},
+        "search_code": {"level": "auto", "taint": true},
+        "search_commits": {"level": "auto"},
+        "search_repositories": {"level": "auto"},
+        "get_label": {"level": "auto"},
+        "issue_read": {"level": "auto", "taint": true},
+        "list_issue_fields": {"level": "auto"},
+        "list_issue_types": {"level": "auto"},
+        "list_issues": {"level": "auto", "taint": true},
+        "search_issues": {"level": "auto", "taint": true},
+        "list_pull_requests": {"level": "auto", "taint": true},
+        "pull_request_read": {"level": "auto", "taint": true},
+        "search_pull_requests": {"level": "auto", "taint": true},
+        "search_users": {"level": "auto"},
+
+        "create_branch": {"level": "ask"},
+        "fork_repository": {"level": "ask"},
+        "create_repository": {"level": "ask"},
+        "add_issue_comment": {"level": "ask"},
+        "issue_write": {"level": "ask"},
+        "sub_issue_write": {"level": "ask"},
+        "update_issue_comment": {"level": "ask"},
+        "add_comment_to_pending_review": {"level": "ask"},
+        "add_reply_to_pull_request_comment": {"level": "ask"},
+        "create_pull_request": {"level": "ask"},
+        "pull_request_review_write": {"level": "ask"},
+        "update_pull_request": {"level": "ask"},
+        "update_pull_request_branch": {"level": "ask"},
+
+        "create_or_update_file": {"level": "ask", "no_session": true, "destructive": true},
+        "push_files": {"level": "ask", "no_session": true, "destructive": true},
+        "delete_file": {"level": "ask", "no_session": true, "destructive": true},
+        "merge_pull_request": {"level": "ask", "no_session": true, "destructive": true},
+
+        "delete_repository": {"level": "block", "destructive": true},
+        "assign_copilot_to_issue": {"level": "block"},
+        "request_copilot_review": {"level": "block"}
+      }
+    },
+    "railway": {
+      "tools": {
+        "whoami": {"level": "auto"},
+        "list-projects": {"level": "auto"},
+        "list-services": {"level": "auto"},
+        "list-feature-flags": {"level": "auto"},
+        "get-feature-flag": {"level": "auto"},
+
+        "create-project": {"level": "ask"},
+        "redeploy": {"level": "ask"},
+        "set-feature-flag": {"level": "ask"},
+
+        "accept-deploy": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-feature-flag": {"level": "ask", "no_session": true, "destructive": true},
+
+        "railway-agent": {"level": "block"}
+      }
+    },
+    "resend": {
+      "tools": {
+        "list-emails": {"level": "auto"},
+        "get-email": {"level": "auto"},
+        "get-email-metrics": {"level": "auto"},
+        "list-sent-email-attachments": {"level": "auto"},
+        "get-sent-email-attachment": {"level": "auto"},
+        "list-logs": {"level": "auto"},
+        "get-log": {"level": "auto"},
+
+        "list-received-emails": {"level": "auto", "taint": true},
+        "get-received-email": {"level": "auto", "taint": true},
+        "list-received-email-attachments": {"level": "auto", "taint": true},
+        "get-received-email-attachment": {"level": "auto", "taint": true},
+
+        "cancel-email": {"level": "ask"},
+        "update-email": {"level": "ask"},
+
+        "send-email": {"level": "ask", "no_session": true},
+        "send-batch-emails": {"level": "ask", "no_session": true}
+      }
+    },
+    "gmail": {
+      "tools": {
+        "search_messages": {"level": "auto", "taint": true},
+        "get_message": {"level": "auto", "taint": true},
+        "get_thread": {"level": "auto", "taint": true},
+        "list_labels": {"level": "auto"}
+      }
+    }
+  }
+}
