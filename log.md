@@ -62,3 +62,19 @@
 
 ### 작업 방식 메모
 - CPU 사용량이 커서(서브 에이전트 두 개의 `swift build`와 `go build`가 동시에 돌았음) 작업을 멈췄다가, 무거운 작업은 하나씩 순서대로 진행하기로 했다. 빌드 병렬도도 제한한다(`go build -p 2`, `swift build -j 2`).
+
+### 캐릭터: 등대 v2 (F-12, `app/LighthouseKit`)
+- 서브 에이전트가 SwiftUI 도형으로 그렸다. 22단위 격자(22pt에서 1단위 = 1pt), 짧고 넓은 탑, 눈 지름 2.2pt, 선 굵기 22pt에서 1pt. 색은 4개(몸 `#F7F4EC`, 구조 회색 `#98A1B3`, 잉크 `#1C2233`, 램프색)이고 켜진 유리창은 램프색을 섞은 불투명 단색이다. 반투명·그라디언트·원형 배지 없음.
+- 상태 12종마다 불빛(F/Q/Fl/Oc/Iso/Al/회전 빛줄기/꺼짐), 눈, 배지, 몸짓이 함께 달라진다(색 말고도 두 가지 이상 차이). 가장 빠른 점멸은 1초에 1번(Q, 0.4초 켜짐). "동작 줄이기"나 `animated: false`면 깜빡임·회전·점프를 멈추고 불은 켠 채로 둔다. 바뀔 때만 다시 그린다.
+- 테스트 15개: 1ms 간격으로 30초 샘플링해 1Hz 초과 점멸 없음, 동작 줄이기 시 고정, 꺼짐 상태 3종은 항상 꺼짐, 상태끼리 색 외 단서 2개 이상 차이 등. 기준을 일부러 어겨 테스트가 실패하는지도 확인했다.
+- 앱 쪽 참고: 뷰 폭은 `size × 24/22`(오른쪽에 배지·빛줄기 자리). `LighthouseView.aspectRatio`로 노출.
+
+### M5 플러그인 코드 (`auth`, `upstream`, `plugins`)
+- `auth`: 메타데이터 조회(RFC 8414/9728, https만), device flow(RFC 8628), loopback + PKCE(S256, state 검증), `resource` 파라미터를 붙이는 토큰 갱신(x/oauth2 기본 갱신은 못 붙임), 갱신으로 바뀐 토큰(Resend는 refresh token이 매번 바뀜)을 자동 저장, 갱신 실패 시 "토큰 만료" 처리.
+- `upstream.Remote`: 원격 Streamable HTTP MCP 클라이언트. 처음 쓸 때 연결, 실패하면 다음에 재연결. 호출 자체는 재시도하지 않음(5-4).
+- `upstream/gmail`: Gmail REST API를 직접 호출하는 자체 도구 4개(검색·메일·스레드·라벨). `google.golang.org/api`는 무거워서 쓰지 않았다. text/plain 우선, 없으면 HTML에서 텍스트 추출, 본문 32KB 제한. 검색 결과에도 외부인이 쓴 제목·발췌가 있어 `search_messages`도 오염 소스로 분류했다.
+- `plugins`: GitHub(device flow, `repo read:org`, `X-MCP-Toolsets`, 읽기 전용 스위치 `X-MCP-Read-Only`), Railway(메타데이터 조회 → DCR → device flow, `resource` 포함), Resend(CIMD client_id `https://farero-dev.github.io/oauth/client-metadata.json`, loopback `/callback`, `full_access`), Gmail(사용자 GCP 클라이언트, `access_type=offline`, `prompt=consent`). 데몬 재시작 시 저장된 토큰으로 복원.
+- `oauth/client-metadata.json`: Resend CIMD 문서. **GitHub Pages는 main에서 배포되므로 main에 병합해야 실제 주소에서 열린다.**
+- 실제 메타데이터 확인(curl): Railway는 `mcp.railway.com` → `backboard.railway.com`(DCR `/oauth/register`, device `/oauth/device/auth`, S256). Resend는 리소스 식별자가 `https://mcp.resend.com`(루트)이고 MCP 엔드포인트는 `/mcp`라서 둘을 분리했다(버그 수정). `client_id_metadata_document_supported: true`. GitHub MCP의 리소스는 `https://api.githubcopilot.com/mcp`, 인증 서버 `https://github.com/login/oauth`.
+- 아직 못 한 것: 실제 계정으로 연결(M0-4). GitHub OAuth App(`farero-dev` 조직, device flow 켜기)의 client ID가 필요하다(`-X main.githubClientID=…` 또는 `FARERO_GITHUB_CLIENT_ID`).
+- 테스트: 가짜 OAuth 서버로 loopback(PKCE·resource·state 위조 거부), device flow(authorization_pending 후 성공), 갱신(refresh token 교체·저장, 실패 시 만료 콜백 1회), 가짜 Gmail API, SDK로 띄운 가짜 MCP 서버로 원격 플러그인.

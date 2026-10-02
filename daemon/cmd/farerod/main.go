@@ -17,6 +17,7 @@ import (
 	"github.com/farero-dev/farero/daemon/internal/core"
 	"github.com/farero-dev/farero/daemon/internal/ipc"
 	"github.com/farero-dev/farero/daemon/internal/paths"
+	"github.com/farero-dev/farero/daemon/internal/plugins"
 	"github.com/farero-dev/farero/daemon/internal/policy"
 	"github.com/farero-dev/farero/daemon/internal/secret"
 	"github.com/farero-dev/farero/daemon/internal/store"
@@ -66,21 +67,24 @@ func run(log *slog.Logger, dev bool) error {
 	if dev {
 		devRules(tab)
 	}
+	env := &plugins.Env{Store: st, Secrets: secrets, Log: log, Version: version, GitHubClientID: githubClientID}
+	services := plugins.Services(env)
 	c, err := core.New(ctx, core.Options{
 		Version:    version,
 		Store:      st,
 		Secrets:    secrets,
 		Table:      tab,
 		Log:        log,
-		Connectors: connectors(log, st, secrets),
+		Connectors: plugins.Connectors(services),
 	})
 	if err != nil {
 		return err
 	}
+	env.Core = c
 	if dev {
 		devPlugins(c)
 	}
-	restorePlugins(ctx, log, c)
+	plugins.RestoreAll(ctx, env, services)
 	c.RefreshTools(ctx)
 	if err := c.StartGateway(ctx); err != nil {
 		// Keep running: the app shows the error and hooks still work.
