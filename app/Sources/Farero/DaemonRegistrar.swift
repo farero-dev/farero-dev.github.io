@@ -25,7 +25,7 @@ final class DaemonRegistrar {
         }
     }
 
-    static let plistName = "dev.farero.farerod.plist"
+    nonisolated static let plistName = "dev.farero.farerod.plist"
 
     private(set) var status: Status = .notRegistered
     private var alertShown = false
@@ -86,7 +86,7 @@ final class DaemonRegistrar {
         let service = self.service
         if service.status == .enabled || service.status == .requiresApproval {
             do {
-                try await service.unregister()
+                try await Self.unregisterAgent()
             } catch {
                 refresh()
                 return "등록 해제 실패: \(error.localizedDescription)"
@@ -100,6 +100,12 @@ final class DaemonRegistrar {
             refresh()
             return error.localizedDescription
         }
+    }
+
+    /// SMAppService is not Sendable on older SDKs, so the instance passed to
+    /// the nonisolated async `unregister()` is created off the main actor.
+    nonisolated private static func unregisterAgent() async throws {
+        try await SMAppService.agent(plistName: plistName).unregister()
     }
 
     func openLoginItemsSettings() {
