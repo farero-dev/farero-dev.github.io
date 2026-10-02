@@ -1,0 +1,7 @@
+# build outputs
+/build/
+/experiments/bin/
+/app/.build/
+/app/.swiftpm/
+*.xcodeproj/xcuserdata/
+.DS_Store
