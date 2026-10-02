@@ -98,3 +98,7 @@
 - `scripts/build.sh 0.1.0-dev` 첫 실행 성공(31.6초, `JOBS=2`). Farero·farerod·farero-hook 모두 `x86_64 arm64`, ad-hoc 서명 검증 통과(`--strict`), Info.plist 버전 치환, LaunchAgent plist(`BundleProgram Contents/MacOS/farerod`), x86_64 쪽도 Rosetta로 실행 확인, zip 약 15MB, farerod는 시스템 프레임워크만 링크.
 - GitHub Actions: `ci.yml`(develop 푸시 시 Go·Swift 테스트), `release.yml`(`v*` 태그 → Universal 빌드 → Releases). GitHub OAuth App client ID는 저장소 변수 `FARERO_GITHUB_CLIENT_ID`로 넣는다.
 - farerod는 LaunchAgent로 실행될 때 `~/Library/Logs/Farero/farerod.log`에 로그를 남긴다(10MB 넘으면 새로 시작).
+
+### 앱 2단계 (서브 에이전트)
+- 설정 창(승인 정책·일반·Claude Code 등록과 diff 확인, 다른 앱 PermissionRequest 훅 경고), 플러그인 창(device code 표시, Gmail GCP 안내 시트, GitHub 읽기 전용), 로그 검색(필터·상세·세션 삭제), 노치 세션 삭제, 설정 도우미, 업데이트 확인(GitHub Releases, 404는 정상), 앱·데몬 버전 불일치 시 데몬 재등록. 테스트 111개 통과.
+- 남은 데몬 수정: (1) 처음 연결 실패 이유가 `plugin.updated`에 실리지 않음, (2) 미연결 상태 `plugin.set_option`이 재연결 실패로 오류, (3) `call.logged` 알림에 큰 입력이 그대로 실림, (4) `claude mcp add-json`이 적용 직후 settings.json을 다시 고치는 점 안내.

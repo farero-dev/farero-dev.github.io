@@ -79,6 +79,29 @@ final class DaemonRegistrar {
         }
     }
 
+    /// Unregisters and registers again so launchd runs the farerod of the
+    /// current bundle. Returns an error message on failure.
+    func reregister() async -> String? {
+        if Self.skipReason() != nil { return "개발 모드에서는 다시 등록하지 않음" }
+        let service = self.service
+        if service.status == .enabled || service.status == .requiresApproval {
+            do {
+                try await service.unregister()
+            } catch {
+                refresh()
+                return "등록 해제 실패: \(error.localizedDescription)"
+            }
+        }
+        do {
+            try service.register()
+            refresh()
+            return nil
+        } catch {
+            refresh()
+            return error.localizedDescription
+        }
+    }
+
     func openLoginItemsSettings() {
         SMAppService.openSystemSettingsLoginItems()
     }

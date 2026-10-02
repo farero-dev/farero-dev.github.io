@@ -126,8 +126,6 @@ public struct AppState: Sendable, Equatable {
         case .callLogged(let call):
             if CallDecision.showsDenied.contains(call.decision) { lastDeniedAt = now }
             if !call.error.isEmpty { lastErrorAt = now }
-        case .gatewayStatus(let g):
-            gateway = g
         case .pluginUpdated(let p):
             if let i = plugins.firstIndex(where: { $0.plugin == p.plugin }) {
                 plugins[i] = p

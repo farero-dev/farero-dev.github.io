@@ -150,9 +150,9 @@ struct DecodingTests {
         #expect(b.expiresAt == nil)
     }
 
-    @Test func gatewayStatus() throws {
+    @Test func removedGatewayStatusIsJustUnknown() throws {
         let m = try decode(#"{"type":"gateway.status","data":{"running":true,"port":1,"url":"u"}}"#)
-        #expect(m.payload == .gatewayStatus(GatewayInfo(running: true, port: 1, url: "u")))
+        #expect(m.payload == .unknown(type: "gateway.status"))
     }
 
     @Test func okAndErrorReplies() throws {

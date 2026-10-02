@@ -6,23 +6,24 @@ import FareroCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let model = AppModel()
-    private let registrar = DaemonRegistrar()
     private var notch: NotchController?
     private var statusItem: StatusItemController?
     private var windows: WindowManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let windows = WindowManager(model: model, registrar: registrar)
+        let windows = WindowManager(model: model)
         self.windows = windows
-        statusItem = StatusItemController(model: model, windows: windows, registrar: registrar)
+        statusItem = StatusItemController(model: model, windows: windows)
         let notch = NotchController(model: model)
         self.notch = notch
         notch.start()
         model.start()
 
         // Register farerod as a LaunchAgent (skipped in development runs).
-        registrar.registerIfNeeded()
-        model.registrationLabel = registrar.status.label
+        model.registrar.registerIfNeeded()
+        model.registrationLabel = model.registrar.status.label
+        windows.showOnboardingIfFirstLaunch()
+        windows.openDebugWindows()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

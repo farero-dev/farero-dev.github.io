@@ -7,14 +7,13 @@ import FareroCore
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let model: AppModel
     private let windows: WindowManager
-    private let registrar: DaemonRegistrar
+    private var registrar: DaemonRegistrar { model.registrar }
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var shownCharacter: CharacterState?
 
-    init(model: AppModel, windows: WindowManager, registrar: DaemonRegistrar) {
+    init(model: AppModel, windows: WindowManager) {
         self.model = model
         self.windows = windows
-        self.registrar = registrar
         super.init()
         let menu = NSMenu()
         menu.delegate = self
@@ -62,11 +61,21 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if registrar.status == .requiresApproval {
             menu.addItem(action("로그인 항목에서 데몬 허용…", #selector(openLoginItems)))
         }
+        if let notice = model.versionNotice {
+            menu.addItem(info(notice))
+        }
         menu.addItem(.separator())
         menu.addItem(action("설정…", #selector(openSettings), key: ","))
         menu.addItem(action("플러그인 연결…", #selector(openPlugins)))
         menu.addItem(action("로그 검색…", #selector(openLog), key: "f"))
+        menu.addItem(action("설정 도우미…", #selector(openOnboarding)))
         menu.addItem(action("데몬 상태…", #selector(openDaemonStatus)))
+        if let update = model.availableUpdate {
+            menu.addItem(.separator())
+            let item = action("새 버전 \(update.version) 받기", #selector(openUpdate))
+            item.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         menu.addItem(action("farero 종료", #selector(quit), key: "q"))
     }
@@ -92,6 +101,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func openPlugins() { windows.show(.plugins) }
     @objc private func openLog() { windows.show(.logSearch) }
     @objc private func openDaemonStatus() { windows.show(.daemonStatus) }
+    @objc private func openOnboarding() { windows.show(.onboarding) }
+    @objc private func openUpdate() {
+        if let url = model.availableUpdate?.url { NSWorkspace.shared.open(url) }
+    }
     @objc private func openLoginItems() { registrar.openLoginItemsSettings() }
     @objc private func quit() { NSApp.terminate(nil) }
 }

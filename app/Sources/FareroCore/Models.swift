@@ -448,6 +448,17 @@ public struct PolicyTool: Sendable, Equatable, Identifiable, Decodable {
     public var defaultLevel: String
     public var overridden: Bool
     public var id: String { plugin + "_" + tool }
+    public init(plugin: String, tool: String, level: String, noSession: Bool = false, taint: Bool = false,
+                destructive: Bool = false, defaultLevel: String = "", overridden: Bool = false) {
+        self.plugin = plugin
+        self.tool = tool
+        self.level = level
+        self.noSession = noSession
+        self.taint = taint
+        self.destructive = destructive
+        self.defaultLevel = defaultLevel.isEmpty ? level : defaultLevel
+        self.overridden = overridden
+    }
     enum CodingKeys: String, CodingKey {
         case plugin, tool, level, taint, destructive, overridden
         case noSession = "no_session"

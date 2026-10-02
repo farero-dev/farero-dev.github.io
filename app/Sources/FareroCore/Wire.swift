@@ -11,7 +11,6 @@ public enum MessageType {
     public static let approvalResponse = "approval.response"
     public static let approvalCancelled = "approval.cancelled"
     public static let callLogged = "call.logged"
-    public static let gatewayStatus = "gateway.status"
     public static let pluginUpdated = "plugin.updated"
     public static let pluginPrompt = "plugin.prompt"
     public static let logQuery = "log.query"
@@ -44,7 +43,6 @@ public enum ServerPayload: Sendable, Equatable {
     case approvalRequest(Approval)
     case approvalCancelled(ApprovalCancelled)
     case callLogged(Call)
-    case gatewayStatus(GatewayInfo)
     case pluginUpdated(PluginState)
     case pluginPrompt(PluginPrompt)
     case logResult([Call])
@@ -100,7 +98,6 @@ extension IncomingMessage: Decodable {
         case MessageType.approvalRequest: payload = .approvalRequest(try data(Approval.self))
         case MessageType.approvalCancelled: payload = .approvalCancelled(try data(ApprovalCancelled.self))
         case MessageType.callLogged: payload = .callLogged(try data(Call.self))
-        case MessageType.gatewayStatus: payload = .gatewayStatus(try data(GatewayInfo.self))
         case MessageType.pluginUpdated: payload = .pluginUpdated(try data(PluginState.self))
         case MessageType.pluginPrompt: payload = .pluginPrompt(try data(PluginPrompt.self))
         case MessageType.logResult: payload = .logResult(try list(Call.self))

@@ -93,9 +93,10 @@ struct CharacterResolverTests {
         #expect(state(one) == .working)
         let thinking = Fixture.connected(sessions: [Fixture.session("s1")])
         #expect(state(thinking) == .thinking)
-        // waiting_approval is not running.
+        // waiting_approval is not running; with no farero card it waits on
+        // the terminal's prompt, shown as waiting for input.
         let waiting = Fixture.connected(sessions: [Fixture.session("s1", status: .waitingApproval, tool: "Bash")])
-        #expect(state(waiting) == .sleeping)
+        #expect(state(waiting) == .waitingInput)
     }
 
     @Test func greetingForTwoSecondsThenWaitingInput() {

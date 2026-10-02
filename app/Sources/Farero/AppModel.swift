@@ -29,12 +29,24 @@ final class AppModel {
     var metrics = NotchMetrics.default
     /// The daemon registration status line for the menu.
     var registrationLabel = ""
+    /// farerod's user settings (`settings.get`), fetched after each snapshot.
+    var daemonSettings: DaemonSettings?
+    /// A newer release found by the update check (Q41).
+    var availableUpdate: UpdateCheck.Available?
+    /// Connect flows started from this app and how they ended, by plugin.
+    var pluginActivity: [String: PluginActivity] = [:]
+    /// What the daemon version check did (shown in 데몬 상태).
+    var versionNotice: String?
 
     var mode: NotchMode { NotchMode.resolve(state, hovering: hovering, pinned: pinned) }
 
     @ObservationIgnored let socketPath: String
     @ObservationIgnored let client: IPCClient
     @ObservationIgnored let hotKeys = HotKeyCenter()
+    @ObservationIgnored let registrar = DaemonRegistrar()
+    @ObservationIgnored var updateTask: Task<Void, Never>?
+    @ObservationIgnored var reregistration = ReregistrationState.idle
+    @ObservationIgnored var openedPromptURLs: Set<String> = []
     /// AppKit controllers that follow the state (status item, panel).
     @ObservationIgnored var onChange: [() -> Void] = []
 
@@ -45,8 +57,7 @@ final class AppModel {
 
     init(socketPath: String = IPCClient.defaultSocketPath()) {
         self.socketPath = socketPath
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-        client = IPCClient(socketPath: socketPath, clientVersion: "farero-app/\(version)")
+        client = IPCClient(socketPath: socketPath, clientVersion: "farero-app/\(Self.appVersion ?? "dev")")
         hotKeys.onPress = { [weak self] shortcut in self?.answerFront(shortcut) }
         if Self.debug {
             hotKeys.debugLog = { FileHandle.standardError.write(Data("farero: \($0)\n".utf8)) }
@@ -97,6 +108,7 @@ final class AppModel {
         inputTextCache = inputTextCache.filter { live.contains($0.key) }
         hotKeys.update(ApprovalShortcut.available(front: state.frontApproval))
         refreshCharacter()
+        handleSideEffects(of: action)
         for f in onChange { f() }
     }
 

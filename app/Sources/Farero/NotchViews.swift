@@ -223,10 +223,65 @@ struct ExpandedContent: View {
 struct SessionRow: View {
     let model: AppModel
     let session: Session
+    /// Deleting asks inline: an alert would activate the app and take focus.
+    @State private var confirmingDelete = false
+    @State private var deleting = false
 
     var body: some View {
+        if confirmingDelete {
+            deleteConfirmation
+        } else {
+            summary
+                .contextMenu {
+                    Button("터미널로 이동") { model.jump(to: session) }.disabled(session.tty.isEmpty)
+                    Divider()
+                    Button("세션 삭제…", role: .destructive) { confirmingDelete = true }
+                }
+        }
+    }
+
+    private var deleteConfirmation: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "trash").foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("세션과 그 로그를 삭제합니다")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(SessionDisplay.name(session, now: .now))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if deleting { ProgressView().controlSize(.small) }
+            Button("취소") { confirmingDelete = false }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.12)))
+            Button("삭제") {
+                deleting = true
+                Task {
+                    if let error = await model.deleteSession(session.id) {
+                        model.showToast("삭제하지 못함: \(error)")
+                        confirmingDelete = false
+                    }
+                    deleting = false
+                }
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Color(red: 1, green: 0.55, blue: 0.55))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 7).fill(Color.red.opacity(0.25)))
+            .disabled(deleting)
+        }
+    }
+
+    private var summary: some View {
         let pending = model.state.pendingApprovalCount(sessionID: session.id)
-        HStack(spacing: 10) {
+        return HStack(spacing: 10) {
             Circle()
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
@@ -270,6 +325,18 @@ struct SessionRow: View {
             .disabled(session.tty.isEmpty)
             .help(session.tty.isEmpty ? "터미널 정보 없음" : "터미널로 이동 (\(session.tty))")
             .accessibilityLabel("터미널로 이동")
+            Button {
+                confirmingDelete = true
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12))
+                    .frame(width: 26, height: 26)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("세션 삭제")
+            .accessibilityLabel("세션 삭제")
         }
     }
 
