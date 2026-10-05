@@ -1,0 +1,8 @@
+# build outputs
+/build/
+/experiments/bin/
+# SwiftPM build dirs at any depth (app/, app/LighthouseKit/)
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+.DS_Store

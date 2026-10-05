@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: daemon/go.sum
+      - name: Daemon tests
+        working-directory: daemon
+        run: |
+          go vet ./...
+          go test -race ./...
+      - name: Release build compiles without the dev plugin
+        working-directory: daemon
+        run: go build ./cmd/... && go build -tags farero_dev ./cmd/...
+      - name: Character tests
+        run: swift test --package-path app/LighthouseKit
+      - name: App tests
+        run: swift test --package-path app
