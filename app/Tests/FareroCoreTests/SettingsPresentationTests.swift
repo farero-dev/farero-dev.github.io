@@ -132,7 +132,10 @@ struct PluginPresentationTests {
         #expect(PluginPresentation.actions("connected") == [.reconnect, .disconnect])
         #expect(PluginPresentation.scopes("github") == "repo, read:org")
         #expect(PluginPresentation.scopes("gmail")?.hasPrefix("gmail.readonly") == true)
-        #expect(PluginPresentation.usesDeviceCode("railway"))
+        #expect(PluginPresentation.usesDeviceCode("github"))
+        // Railway refuses the device flow for DCR clients (M0), so it signs
+        // in through the browser like Resend.
+        #expect(!PluginPresentation.usesDeviceCode("railway"))
         #expect(!PluginPresentation.usesDeviceCode("resend"))
     }
 }

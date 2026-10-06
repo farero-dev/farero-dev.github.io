@@ -45,7 +45,7 @@ farero backs up the original file first. **Remove settings** deletes only what f
 ### Permissions farero asks for
 
 - **GitHub:** OAuth device flow with scopes `repo` and `read:org`.
-- **Railway:** OAuth device flow with scopes `openid profile email offline_access workspace:member`. Project tokens are not accepted.
+- **Railway:** OAuth in your browser (PKCE, loopback redirect) with scopes `openid profile email offline_access workspace:member`. Project tokens are not accepted.
 - **Resend:** OAuth with scope `full_access`. Only email-related tools are exposed. API keys, domains and webhooks are not.
 - **Gmail:** `gmail.readonly` only, through an OAuth client you create in your own Google Cloud project. The app walks you through it.
 - **Automation (Terminal.app):** used only to jump to the terminal tab of a session.

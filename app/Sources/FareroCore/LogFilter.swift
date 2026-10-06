@@ -200,8 +200,9 @@ public enum PluginPresentation {
         }
     }
 
-    /// How the plugin signs in.
+    /// How the plugin signs in. Railway refuses the device flow for
+    /// dynamically registered clients, so only GitHub uses a device code.
     public static func usesDeviceCode(_ plugin: String) -> Bool {
-        plugin == "github" || plugin == "railway"
+        plugin == "github"
     }
 }
