@@ -217,3 +217,35 @@ M2 코드(훅 → 세션 상태 기계 → 앱 목록, `sessions`·`hook_events`
 - 터미널에서 Yes를 누른 뒤 명령이 끝나기(PostToolUse) 전에 앱에서 거부하면, 로그에 `denied`가 남지만 명령은 실행된다. 터미널 허용을 그 순간 알 신호가 없다.
 - 터미널에서 허용한 명령이 도는 중에 Esc·`/exit`로 훅이 끝나면 `cancelled`(이유 없음)로 남아, 터미널 거부와 구별되지 않는다.
 - 확인 못 한 것: 실제 `StopFailure` 이벤트로의 전환(단위 테스트만), 서브에이전트 대기 e2e, 앱 화면(노치 세션 목록)을 눈으로 확인하는 것. 앱 상태 처리는 FareroCore 테스트와 devctl(같은 IPC)로 확인했다.
+
+### M3 에이전트 도구 승인 (2026-10-06)
+M3 코드(`PermissionRequest` → 승인 카드 → `decision.behavior`, 승인 큐·10분 마감·UI 없으면 `none`, 도구 + 같은 입력 단위 세션 허용, `calls`에 에이전트 도구 판단 기록, 노치 승인 카드·단축키)는 대부분 이미 있었다. 브랜치는 develop(M2) 위에서 시작했다(`seongj-un/m3`가 main 기준이라 develop으로 옮김). M2에서 넘긴 문제를 고치고, 실제 Claude Code로 완료 기준을 확인했다.
+
+**확인한 사실 (Claude Code 2.1.291, M2 실험 기록 재분석 포함)**
+- `PermissionRequest` 입력에는 `tool_use_id`가 없다. 바로 앞 `PreToolUse`(같은 도구·입력)와 그 도구의 `PostToolUse`·`PostToolUseFailure`에는 있다. `PostToolUse`에는 `duration_ms`(실행 시간, 권한 프롬프트 제외)도 있다.
+- 훅이 거부(deny)하면 그 도구 사용에 대한 `PostToolUse`·`PostToolUseFailure`는 오지 않는다(거부 → 바로 `Stop`).
+- 실행 중인 도구를 Esc로 멈추면 Claude Code는 transcript에 터미널 거부와 같은 `User rejected tool use`를 남기고 훅 이벤트도 보내지 않는다. 그래서 "터미널에서 허용한 뒤 Esc"와 "터미널에서 거부"는 구별하지 않고 둘 다 `cancelled`(이유 없음)로 둔다(Claude Code 자신도 거부로 기록).
+
+**고친 것**
+- **터미널에서 먼저 허용한 뒤 앱에서 거부(또는 시간 초과):** Claude Code는 늦게 온 훅의 deny를 무시하고 도구를 실행한다. farerod가 `PreToolUse`의 `tool_use_id`를 기억해 `PermissionRequest`에 붙이고, farero가 거부한 도구 사용의 `PostToolUse(Failure)`가 오면 로그 줄을 `cancelled`/`answered_in_agent`로 고친다(`internal/core/agentwait.go`). 앱의 답이 도착하기 직전에 에이전트가 이미 진행한 경우(같은 순간의 경쟁)도 같은 결과로 남긴다. 세션 허용 답이었으면 허용 기록은 남긴다. 다시 시도한 같은 명령은 새 `tool_use_id`라 앞의 거부 줄은 그대로다.
+- 카드를 거두는 `PostToolUse` 매칭에 `tool_use_id`를 더해, 같은 명령의 이전 실행이 끝난 것으로 새 카드가 닫히지 않게 했다.
+- **소켓 JSON의 HTML 이스케이프:** `farero-hook` → `farerod` 전송이 `encoding/json` 기본값이라 도구 입력의 `&&`·`>>`가 `&&`·`>>`로 바뀐 채 감사 로그에 저장됐다. 로그 검색에서 `&&`로 찾을 수 없었다. 소켓과 앱 알림 모두 이스케이프하지 않는다(`ipc.Marshal`). 이미 저장된 줄은 그대로다.
+- 개발용: `farerod --dev`에서 `FARERO_APPROVAL_TIMEOUT`(예: `30s`)으로 승인 마감을 줄일 수 있다. `farero-devctl answer <id> allow|allow_session|deny`로 특정 카드에 답한다.
+
+**실제 검증 (`scripts/e2e-approvals.py`)**
+M2 하네스(pty·화면·격리 설정)를 `scripts/e2elib.py`로 분리해 `e2e-sessions.py`와 같이 쓴다. 분리 뒤 `e2e-sessions.py`(M2)도 다시 통과했다(64개).
+
+`scripts/e2e-approvals.py` (Claude Code 2.1.291, haiku, 격리 설정, 앱 대신 `farero-devctl`). 마지막 실행 67개 검사 모두 통과.
+
+| 확인 | 결과 |
+|---|---|
+| 시나리오 A: `npm install` | 카드(에이전트 도구 Bash, 이유 `agent_request`, 세션 허용 버튼, 입력 전체, 마감)와 터미널 프롬프트가 함께 뜸 → 카드에서 허용 → 터미널 프롬프트가 바로 닫히고("Allowed by PermissionRequest hook") npm 실행 → `user_allowed` |
+| 세션 허용 범위(Q38) | `echo hit >> grant.log`를 "이번 세션 동안 허용" → 같은 명령은 카드·프롬프트 없이 실행(`session_allowed`) → 다른 명령은 다시 물음 → 카드에서 거부하면 실행되지 않고 모델이 "farero: 사용자가 거부함"을 받음(`denied`) |
+| 터미널 허용 뒤 앱 거부 | 터미널 Yes → 도구가 도는 동안 카드가 그대로 → 카드에서 거부 → 도구는 끝까지 실행됨 → 로그가 `denied`에서 `cancelled`/`answered_in_agent`로 바뀜(한 줄) |
+| 승인 마감 | 개발용 30초: 30.0초에 `timeout`으로 카드가 거둬지고 훅이 거부, 명령 미실행, 모델이 "승인 대기 시간 초과"를 받음. **실제 10분(`E2E_APPROVAL_TIMEOUT=10m`)도 통과: 600.0초에 같은 결과, Claude Code가 훅(timeout 660)을 먼저 끊지 않음** |
+| 앱 꺼짐 | 카드 없이 훅이 아무것도 출력하지 않음(`passthrough`/`app_not_running`) → 터미널 프롬프트에서 Yes → 실행 |
+| `StopFailure` | 없는 모델(`--model claude-nonexistent-farero`)로 프롬프트 → `Stop` 없이 `StopFailure` → running → waiting_input. M2에서 단위 테스트로만 확인했던 항목 |
+| farero 거부 뒤 | 그 도구 사용의 `PostToolUse(Failure)`는 오지 않음 → 거부·시간 초과 줄은 그대로 |
+
+- 스크립트에서 고친 것: 터미널 프롬프트가 열린 직전에는 첫 선택지 줄에 진행 표시가 겹쳐 있어("1. …(running PreToolUse hook)") "Yes" 선택을 기다렸다가 읽는다. 알 수 없는 모델이면 하단에 "? for shortcuts" 대신 권한 모드("auto mode on")가 보여서 입력 대기 판정에 넣었다.
+- 확인 못 한 것: 노치 카드의 단축키(⌃⌥Y/S/N)와 클릭을 실제 앱 번들에서 누르는 것, 포커스를 빼앗지 않는지 눈으로 보는 것(M0 2차에서 카드로 두 건 처리한 기록은 있음). 서브에이전트의 승인 대기 e2e.
