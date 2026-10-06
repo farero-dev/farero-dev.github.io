@@ -75,12 +75,13 @@ func run(log *slog.Logger, dev bool) error {
 	env := &plugins.Env{Store: st, Secrets: secrets, Log: log, Version: version, GitHubClientID: githubClientID}
 	services := plugins.Services(env)
 	c, err := core.New(ctx, core.Options{
-		Version:    version,
-		Store:      st,
-		Secrets:    secrets,
-		Table:      tab,
-		Log:        log,
-		Connectors: plugins.Connectors(services),
+		Version:         version,
+		Store:           st,
+		Secrets:         secrets,
+		Table:           tab,
+		Log:             log,
+		ApprovalTimeout: approvalTimeout(log, dev),
+		Connectors:      plugins.Connectors(services),
 	})
 	if err != nil {
 		return err
@@ -152,6 +153,23 @@ func logOutput() io.Writer {
 		return os.Stderr
 	}
 	return f
+}
+
+// approvalTimeout is the approval deadline: 10 minutes (Q29), or
+// FARERO_APPROVAL_TIMEOUT (a Go duration) in --dev, so tests need not wait
+// that long.
+func approvalTimeout(log *slog.Logger, dev bool) time.Duration {
+	v := os.Getenv("FARERO_APPROVAL_TIMEOUT")
+	if !dev || v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Warn("ignoring FARERO_APPROVAL_TIMEOUT", "value", v)
+		return 0
+	}
+	log.Info("approval timeout", "timeout", d)
+	return d
 }
 
 func secretStore(dev bool) secret.Store {

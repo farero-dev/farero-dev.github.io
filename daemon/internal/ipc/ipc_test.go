@@ -1,7 +1,11 @@
 package ipc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,4 +78,21 @@ func TestListenRefusesLiveSocketAndReplacesStale(t *testing.T) {
 		t.Fatalf("stale socket not replaced: %v", err)
 	}
 	l2.Close()
+}
+
+// Tool inputs reach the audit log through the socket: `&&` and `>>` must
+// arrive as they are, not as & or >, or a log search misses them.
+func TestNoHTMLEscaping(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	in := json.RawMessage(`{"tool_input":{"command":"npm i && echo ok >> log <x>"}}`)
+	go NewConn(a).Send(TypeHookEvent, "1", HookEvent{Agent: "claude", Input: in, TTY: "a&b"})
+	line, err := bufio.NewReader(b).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(line, []byte(`\u00`)) || !bytes.Contains(line, in) || !bytes.Contains(line, []byte(`"a&b"`)) {
+		t.Fatalf("line: %s", line)
+	}
 }

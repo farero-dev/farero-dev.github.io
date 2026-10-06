@@ -22,10 +22,13 @@ type HookInput struct {
 	HookEventName  string          `json:"hook_event_name"`
 	ToolName       string          `json:"tool_name"`
 	ToolInput      json.RawMessage `json:"tool_input"`
-	PermissionMode string          `json:"permission_mode"`
-	Source         string          `json:"source"` // SessionStart
-	Reason         string          `json:"reason"` // SessionEnd
-	Message        string          `json:"message"`
+	// ToolUseID is in PreToolUse and PostToolUse(Failure), not in
+	// PermissionRequest (Claude Code 2.1.290).
+	ToolUseID      string `json:"tool_use_id"`
+	PermissionMode string `json:"permission_mode"`
+	Source         string `json:"source"` // SessionStart
+	Reason         string `json:"reason"` // SessionEnd
+	Message        string `json:"message"`
 	// NotificationType is the kind of a Notification (permission_prompt,
 	// idle_prompt, ...). Older Claude Code versions leave it out.
 	NotificationType string `json:"notification_type"`

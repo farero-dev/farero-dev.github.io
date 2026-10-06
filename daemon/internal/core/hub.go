@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/json"
 	"sync"
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
@@ -39,7 +38,7 @@ func (h *hub) remove(c *uiClient) {
 }
 
 func (h *hub) broadcast(typ string, data any) {
-	b, err := json.Marshal(data)
+	b, err := ipc.Marshal(data)
 	if err != nil {
 		return
 	}
