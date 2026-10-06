@@ -15,7 +15,10 @@ struct LaunchAgentTests {
         #expect(p["Label"] as? String == "dev.farero.farerod")
         #expect(p["ProgramArguments"] as? [String] == [path])
         #expect(p["RunAtLoad"] as? Bool == true)
-        #expect(p["KeepAlive"] as? Bool == true)
+        // Kept alive only while farerod exists: after the app is deleted
+        // launchd stops retrying, and a reinstall starts it again (M0).
+        let keepAlive = try #require(p["KeepAlive"] as? [String: Any])
+        #expect(keepAlive["PathState"] as? [String: Bool] == [path: true])
         #expect(p["ProcessType"] as? String == "Interactive")
         // SMAppService keys would tie the job to the bundle's signature again.
         #expect(p["BundleProgram"] == nil)

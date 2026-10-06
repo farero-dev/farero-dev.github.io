@@ -18,7 +18,10 @@ public enum LaunchAgent {
             "Label": label,
             "ProgramArguments": [farerodPath],
             "RunAtLoad": true,
-            "KeepAlive": true,
+            // Restart farerod whenever it exits, but only while it exists:
+            // once the app is deleted launchd stops retrying, and a
+            // reinstall starts it again (M0 2026-10-06).
+            "KeepAlive": ["PathState": [farerodPath: true]],
             "ProcessType": "Interactive",
         ]
     }
