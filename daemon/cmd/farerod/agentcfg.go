@@ -89,6 +89,7 @@ func registerAgentConfig(c *core.Core, log *slog.Logger, dev bool) (fixPath func
 			log.Error("fix agent config path", "err", err)
 		} else if fixed {
 			log.Info("agent config paths updated", "hook", hook)
+			c.Notify(ipc.TypeAgentCfgStatus, claude.Status(ctx))
 		}
 	}
 }

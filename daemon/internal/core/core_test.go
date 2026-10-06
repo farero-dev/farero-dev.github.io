@@ -675,3 +675,15 @@ func TestUIConnectsBeforeKeychainAnswers(t *testing.T) {
 		t.Fatalf("snapshot after start: %+v", snap.Gateway)
 	}
 }
+
+// farerod pushes the agent config status when it fixed paths on its own
+// (Q63), so the app can tell the user without opening settings.
+func TestNotifyReachesApps(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	h.core.Notify(ipc.TypeAgentCfgStatus, ipc.AgentCfgStatus{Agent: "claude", Message: "고쳤습니다"})
+	st, err := ipc.Decode[ipc.AgentCfgStatus](u.next(ipc.TypeAgentCfgStatus))
+	if err != nil || st.Message != "고쳤습니다" {
+		t.Fatalf("%+v %v", st, err)
+	}
+}

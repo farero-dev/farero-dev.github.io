@@ -310,3 +310,9 @@ func (c *Core) HandleUI(typ string, h UIHandler) {
 func (c *Core) BroadcastSnapshot(ctx context.Context) {
 	c.hub.broadcast(ipc.TypeStateSnapshot, c.snapshot(ctx))
 }
+
+// Notify sends every connected app a server notification registered from
+// outside core (agent config status after the automatic path fix).
+func (c *Core) Notify(typ string, data any) {
+	c.hub.broadcast(typ, data)
+}
