@@ -40,7 +40,9 @@ There are three processes. All state lives in the daemon (Q40):
 
 IPC uses JSON Lines over `~/Library/Application Support/Farero/farerod.sock` (mode 0600). Every message is `{"type","id","data"}`. The JSON field names in `daemon/internal/model` are the IPC contract the Swift app decodes, so renaming one is a protocol change.
 
-Planned module layout under `daemon/internal/`: `ipc`, `session`, `broker`, `policy`, `correlate`, `gateway`, `upstream`, `auth`, `store`, `secret`, `agentcfg`. These exist today: `model`, `paths`, `store`, `policy`.
+Packages under `daemon/internal/`: `core` (wires everything; the socket server), `ipc`, `session`, `broker`, `policy`, `correlate`, `gateway`, `upstream`, `plugins`, `auth`, `store`, `secret`, `agentcfg`, `model`, `paths`.
+
+farerod opens its socket before anything reads the Keychain (gateway secret, plugin tokens). With ad-hoc signing every update asks for Keychain access again; until the user answers, the app and the hooks still reach farerod, and it re-sends `state.snapshot` once the gateway is up.
 
 ### Policy (기능 명세서 6장, `internal/policy`)
 

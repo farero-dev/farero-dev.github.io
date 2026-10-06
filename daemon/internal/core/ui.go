@@ -302,3 +302,11 @@ func (c *Core) HandleUI(typ string, h UIHandler) {
 	}
 	c.extraUI[typ] = h
 }
+
+// BroadcastSnapshot sends every connected app a fresh snapshot. farerod
+// opens its socket before the Keychain-backed startup (gateway secret,
+// plugin tokens) finishes, and the gateway state has no notification of its
+// own; the app rebuilds its state from any snapshot (docs/ipc.md).
+func (c *Core) BroadcastSnapshot(ctx context.Context) {
+	c.hub.broadcast(ipc.TypeStateSnapshot, c.snapshot(ctx))
+}

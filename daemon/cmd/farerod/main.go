@@ -86,19 +86,11 @@ func run(log *slog.Logger, dev bool) error {
 		return err
 	}
 	env.Core = c
-	if dev {
-		devPlugins(c)
-	}
-	plugins.RestoreAll(ctx, env, services)
-	c.RefreshTools(ctx)
-	if err := c.StartGateway(ctx); err != nil {
-		// Keep running: the app shows the error and hooks still work.
-		log.Error("gateway not started", "err", err)
-	} else {
-		log.Info("gateway listening", "url", c.GatewayInfo().URL)
-	}
-	registerAgentConfig(ctx, c, log, dev)
+	fixAgentPaths := registerAgentConfig(c, log, dev)
 
+	// Open the socket before anything reads the Keychain: with ad-hoc
+	// signing every update asks for Keychain access again, and until the
+	// user answers, the app and the hooks still reach farerod.
 	l, err := ipc.Listen(paths.Socket())
 	if err != nil {
 		return err
@@ -112,6 +104,21 @@ func run(log *slog.Logger, dev bool) error {
 			stop()
 		}
 	}()
+
+	// Keychain-backed startup: plugin tokens, then the gateway secret.
+	if dev {
+		devPlugins(c)
+	}
+	plugins.RestoreAll(ctx, env, services)
+	c.RefreshTools(ctx)
+	if err := c.StartGateway(ctx); err != nil {
+		// Keep running: the app shows the error and hooks still work.
+		log.Error("gateway not started", "err", err)
+	} else {
+		log.Info("gateway listening", "url", c.GatewayInfo().URL)
+	}
+	c.BroadcastSnapshot(ctx)
+	go fixAgentPaths(ctx)
 	<-ctx.Done()
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

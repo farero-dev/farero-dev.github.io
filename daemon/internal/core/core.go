@@ -61,14 +61,15 @@ type Core struct {
 	corr     *correlate.Correlator
 	broker   *broker.Broker
 	plugins  *upstream.Registry
-	gateway  *gateway.Gateway
 	hub      *hub
 
 	connectors map[string]Connector
 	extraUI    map[string]UIHandler
 
 	mu          sync.Mutex
+	gateway     *gateway.Gateway // nil until StartGateway
 	gatewayInfo ipc.GatewayInfo
+	tools       []*mcp.Tool // the exposed list, kept for a gateway started later
 	pluginErr   map[string]string
 	toolIndex   map[string]exposedTool // exposed name -> plugin/tool
 }
@@ -107,11 +108,6 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	if err != nil {
 		return nil, err
 	}
-	secretValue, err := secret.GetOrCreate(o.Secrets, secret.KeyGatewaySecret, secret.RandomToken)
-	if err != nil {
-		return nil, fmt.Errorf("gateway secret: %w", err)
-	}
-	c.gateway = gateway.New(o.Version, secretValue, c, o.Log)
 	return c, nil
 }
 
@@ -122,11 +118,28 @@ func (c *Core) Policy() *policy.Engine { return c.policy }
 func (c *Core) Plugins() *upstream.Registry { return c.plugins }
 
 // StartGateway starts the MCP listener on the saved port, choosing a free
-// one on first run and saving it (Q57).
+// one on first run and saving it (Q57). It reads the gateway secret, so it
+// may wait for a Keychain prompt: with ad-hoc signing every update asks again
+// (M0 2026-10-06). farerod opens its socket before calling it, so the app
+// connects meanwhile; BroadcastSnapshot then tells the app.
 func (c *Core) StartGateway(ctx context.Context) error {
+	secretValue, err := secret.GetOrCreate(c.secrets, secret.KeyGatewaySecret, secret.RandomToken)
+	if err != nil {
+		c.mu.Lock()
+		c.gatewayInfo = ipc.GatewayInfo{Error: "gateway secret: " + err.Error()}
+		c.mu.Unlock()
+		return fmt.Errorf("gateway secret: %w", err)
+	}
+	g := gateway.New(c.version, secretValue, c, c.log)
+	c.mu.Lock()
+	c.gateway = g
+	tools := c.tools
+	c.mu.Unlock()
+	g.SetTools(tools)
+
 	saved, _ := c.store.Setting(ctx, settingGatewayPort)
 	port, _ := strconv.Atoi(saved)
-	bound, err := c.gateway.Start(port)
+	bound, err := g.Start(port)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
@@ -151,7 +164,12 @@ func (c *Core) GatewayInfo() ipc.GatewayInfo {
 
 // Shutdown stops the gateway and closes plugins.
 func (c *Core) Shutdown(ctx context.Context) {
-	c.gateway.Shutdown(ctx)
+	c.mu.Lock()
+	g := c.gateway
+	c.mu.Unlock()
+	if g != nil {
+		g.Shutdown(ctx)
+	}
 	c.plugins.Close()
 }
 
@@ -187,8 +205,12 @@ func (c *Core) RefreshTools(ctx context.Context) {
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	c.mu.Lock()
 	c.toolIndex = index
+	c.tools = tools
+	g := c.gateway
 	c.mu.Unlock()
-	c.gateway.SetTools(tools)
+	if g != nil {
+		g.SetTools(tools)
+	}
 }
 
 func exposeTool(name string, t *mcp.Tool, eff policy.Effective) *mcp.Tool {

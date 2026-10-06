@@ -606,3 +606,72 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 		t.Fatalf("stored input was trimmed: %d", len(stored.Input))
 	}
 }
+
+// blockingSecrets holds every read until release is closed, like a Keychain
+// prompt the user has not answered yet.
+type blockingSecrets struct {
+	secret.Store
+	release chan struct{}
+}
+
+func (b blockingSecrets) Get(key string) (string, error) {
+	<-b.release
+	return b.Store.Get(key)
+}
+
+// With ad-hoc signing every update makes the Keychain ask again, and the
+// user may answer late (M0 2026-10-06). The app must connect meanwhile, and
+// learn about the gateway once it starts.
+func TestUIConnectsBeforeKeychainAnswers(t *testing.T) {
+	st, err := store.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	secrets := blockingSecrets{Store: secret.NewMemoryStore(), release: make(chan struct{})}
+
+	created := make(chan *Core, 1)
+	go func() {
+		c, err := New(ctx, Options{Version: "test", Store: st, Secrets: secrets, Table: policy.DefaultTable()})
+		if err != nil {
+			t.Error(err)
+		}
+		created <- c
+	}()
+	var c *Core
+	select {
+	case c = <-created:
+	case <-time.After(2 * time.Second):
+		close(secrets.release)
+		t.Fatal("New waited for the Keychain")
+	}
+
+	dir, _ := os.MkdirTemp("/tmp", "frc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
+	l, err := ipc.Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ipc.Serve(ctx, l, c.Serve)
+	h := &harness{t: t, core: c, sock: sock, st: st}
+	u := h.ui()
+	if u.snap.Gateway.Running {
+		t.Fatalf("gateway running before its secret was read: %+v", u.snap.Gateway)
+	}
+
+	started := make(chan error, 1)
+	go func() { started <- c.StartGateway(ctx) }()
+	close(secrets.release)
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Shutdown(context.Background()) })
+	c.BroadcastSnapshot(ctx)
+	snap, _ := ipc.Decode[ipc.StateSnapshot](u.next(ipc.TypeStateSnapshot))
+	if !snap.Gateway.Running || snap.Gateway.URL == "" {
+		t.Fatalf("snapshot after start: %+v", snap.Gateway)
+	}
+}

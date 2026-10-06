@@ -14,17 +14,19 @@ import (
 )
 
 // registerAgentConfig wires the Claude Code installer (F-06) into the UI
-// protocol and fixes stale paths after the app moved (Q63).
+// protocol. It must run before the socket serves. The returned function
+// fixes stale paths after the app moved (Q63); it needs the gateway URL, so
+// farerod calls it once the gateway started.
 //
 // FARERO_CLAUDE_CONFIG_DIR points the installer (and the claude CLI it runs)
 // at another Claude Code config directory, so development runs never touch
 // the developer's real ~/.claude. In --dev mode without it, the automatic
 // path fix is skipped.
-func registerAgentConfig(ctx context.Context, c *core.Core, log *slog.Logger, dev bool) {
+func registerAgentConfig(c *core.Core, log *slog.Logger, dev bool) (fixPath func(context.Context)) {
 	exe, err := os.Executable()
 	if err != nil {
 		log.Error("agent config disabled", "err", err)
-		return
+		return func(context.Context) {}
 	}
 	exe, _ = filepath.EvalSymlinks(exe)
 	hook := filepath.Join(filepath.Dir(exe), "farero-hook")
@@ -62,8 +64,11 @@ func registerAgentConfig(ctx context.Context, c *core.Core, log *slog.Logger, de
 		if err := check(m); err != nil {
 			return "", nil, err
 		}
-		if c.GatewayInfo().URL == "" {
-			return "", nil, fmt.Errorf("게이트웨이가 실행 중이 아님: %s", c.GatewayInfo().Error)
+		if gi := c.GatewayInfo(); gi.URL == "" {
+			if gi.Error != "" {
+				return "", nil, fmt.Errorf("게이트웨이가 실행 중이 아님: %s", gi.Error)
+			}
+			return "", nil, fmt.Errorf("게이트웨이가 아직 시작되지 않음: 키체인 접근 허용을 기다리는 중일 수 있음")
 		}
 		st, err := claude.Apply(ctx)
 		return ipc.TypeAgentCfgStatus, st, err
@@ -76,7 +81,7 @@ func registerAgentConfig(ctx context.Context, c *core.Core, log *slog.Logger, de
 		return ipc.TypeAgentCfgStatus, st, err
 	})
 
-	go func() {
+	return func(ctx context.Context) {
 		if c.GatewayInfo().URL == "" || (dev && !isolated) {
 			return
 		}
@@ -85,5 +90,5 @@ func registerAgentConfig(ctx context.Context, c *core.Core, log *slog.Logger, de
 		} else if fixed {
 			log.Info("agent config paths updated", "hook", hook)
 		}
-	}()
+	}
 }

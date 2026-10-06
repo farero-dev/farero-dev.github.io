@@ -116,7 +116,7 @@
 
 | type | data | 뜻 |
 |---|---|---|
-| `state.snapshot` | `{"version","sessions":[Session],"approvals":[Approval],"plugins":[PluginState],"gateway":{"running","port","url","error"}}` | `ui.hello`의 답장. 앱은 이것으로 화면 상태를 처음부터 다시 만든다 |
+| `state.snapshot` | `{"version","sessions":[Session],"approvals":[Approval],"plugins":[PluginState],"gateway":{"running","port","url","error"}}` | `ui.hello`의 답장. 앱은 이것으로 화면 상태를 처음부터 다시 만든다. `farerod`는 키체인을 읽기 전에 소켓을 열기 때문에, 게이트웨이 시작과 플러그인 복원이 끝나면 연결된 앱 모두에 요청 없이 다시 보낸다 |
 | `session.updated` | Session | 세션 상태·현재 도구·오염 변경 |
 | `session.removed` | `{"session_id"}` | 세션 삭제됨 |
 | `approval.request` | Approval | 승인 카드 추가(도착 순서대로 쌓기) |
