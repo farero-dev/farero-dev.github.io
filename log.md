@@ -118,3 +118,39 @@
 
 확인한 시나리오: A(셸 명령을 farero에서 허용 → 실행), C(오염 뒤 세션 허용 무효), D(앱 꺼짐 → 승인 도구 자동 거부, 조회 도구는 동작, 모델이 `is_error`와 사유를 받음), 세션 허용, 세션 연결, 설정 등록·제거.
 CI(GitHub Actions, macOS 15.7 / Xcode 16.4 / Swift 6.1.2)도 통과.
+
+## 2026-10-05 ~ 10-06
+
+### main 병합
+- develop → main PR #1을 merge commit(`2fc837c`)으로 병합했다. 로컬 Go `-race`·Swift 테스트·Universal 빌드와 PR CI가 통과한 뒤 병합했다. Pages(legacy)가 다시 빌드돼 Resend CIMD 문서 `https://farero-dev.github.io/oauth/client-metadata.json`이 200(`application/json`)으로 열린다.
+
+### M0 남은 실험 (Claude Code 2.1.289, macOS 26.6.2)
+
+**5. 터미널을 닫았을 때 `SessionEnd`: 통과.** 기록용 훅(`experiments/e1-correlate/hooklog`)과 격리 설정(`--settings`, `--setting-sources project`)으로 실행했다. 이 세션의 환경 변수(`CLAUDE_CODE_CHILD_SESSION` 등)는 지우고 실행했다.
+
+| 방식 | 경우 | SessionEnd | claude 종료 |
+|---|---|---|---|
+| pty를 닫음(창을 닫을 때와 같은 SIGHUP) | 입력 대기 | +0.03초, reason `other` | 1.15초, 종료 코드 129 |
+| 〃 | 도구 실행 중(`ping -c 90`) | +0.05초 | 0.93초, ping도 종료 |
+| 〃 | `PermissionRequest` 훅 대기 중 | +0.14초 | 0.94초, 대기하던 훅 프로세스도 종료 |
+| 실제 Terminal.app 창 닫기 | 입력 대기 | claude 종료 0.74초 전 | 정상 |
+
+- Terminal.app은 실행 중인 프로세스가 있으면 AppleScript `close`에도 종료 확인 시트를 띄운다. 사용자가 "종료"를 눌러야 닫힌다.
+- 대기 중인 훅 프로세스가 함께 끝나므로, `farero-hook`의 소켓이 끊기면 승인 카드를 거두는 현재 방식으로 충분하다. "10분 무응답 + 프로세스 없음 → 알 수 없음"은 강제 종료(kill -9) 같은 경우의 안전망으로 남긴다.
+- 참고: Claude Code가 단독 `sleep 90` 명령을 자체 정책으로 막는다.
+
+**3. SMAppService 등록(ad-hoc 서명): 등록은 통과, 업데이트는 실패 → 수정.**
+- 깨끗한 상태(설치·데이터·launchd 항목 없음)에서 `/Applications/Farero.app`을 처음 열자 `requiresApproval` 없이 바로 `enabled`로 등록됐다(BTM `enabled, allowed, notified`). farerod가 실행돼 소켓(0600)과 게이트웨이를 열고, 앱이 소켓에 연결됐다. M1 완료 기준 중 "앱을 열면 데몬이 등록·실행"이 확인됐다.
+- **앱 번들을 새 빌드로 바꾸면 farerod가 다시 뜨지 않는다.** BTM이 기존 항목을 무효화하고(`Bundle identifiers from launchd plist ignored because the executable doesn't have a Team ID`) 새 항목을 만드는데, launchd 작업은 예전 BTM 항목을 가리킨 채 `needs LWCR update` 상태가 된다. 그래서 `Could not find and/or execute program … Contents/MacOS/farerod`로 10초마다 실패한다(EX_CONFIG). 앱은 데몬이 떠서 버전을 알려 줘야만 다시 등록했기 때문에 복구하지 못했다.
+- 다시 등록(unregister → register)해도 풀리지 않는다. BTM이 같은 라벨의 기존 항목과 그 LWCR(이전 빌드의 cdhash)을 재사용해서(`registerLaunchItem: found existing item`), 새 farerod는 `Launch Constraint Violation (Constraint not matched)`, `OS_REASON_CODESIGNING`으로 거부된다. launchd의 LWCR 복구 요청도 smd가 `EINVAL`로 거부한다. Team ID가 없는 ad-hoc 서명에서는 SMAppService 에이전트가 업데이트를 견디지 못한다.
+- **결정(사용자, Q55 변경): SMAppService 대신 `~/Library/LaunchAgents`에 plist를 두고 `launchctl`로 등록한다.** 실험(`experiments/e5-launchagent`): ad-hoc 프로브 v1을 LaunchAgent로 띄운 뒤 번들 디렉터리를 v2로 통째로 바꾸고 프로세스를 끝내자 KeepAlive가 v2를 띄웠다. `launchctl kickstart -k`로도 즉시 새 바이너리가 떴다. BTM에는 plist 경로 기준 항목(`enabled, allowed, notified`)으로 기록되고 제약 위반 로그는 없다.
+- 앱 구현: 시작할 때 이전 빌드의 SMAppService 등록을 지우고(같은 라벨이라 먼저 지워야 함), plist가 없거나 다른 farerod 경로를 가리키면 쓰고 `bootout`/`bootstrap`한다. 경로가 같고 farerod의 cdhash가 지난번과 다르면(업데이트·재빌드) `kickstart -k`로 새 바이너리를 띄운다(`LaunchAgent`, `DaemonRegistrationCheck`). 데몬 버전이 앱과 다를 때도 `kickstart -k`한다.
+- 덧붙여, 노치 등대가 움직이지 않았던 것은 이 문제로 farerod가 뜨지 않아 앱이 "연결 끊김"(정지 상태)이었기 때문이다. 같은 설정의 패널을 재현해 보니 `TimelineView`는 accessory 앱의 non-activating 패널에서도 `cadence == .live`로 정상 동작했다.
+
+**앱 번들 실제 조작:** 격리 설정의 claude를 Terminal.app에서 띄워 `PermissionRequest` 두 건을 만들었다. 두 건 모두 farero로 처리됐다(`user_allowed`, `user_allowed`/`allow_session`). 단축키와 클릭 중 어느 쪽으로 눌렀는지, 터미널 점프, 메뉴의 "데몬 연결됨" 표시는 확인하지 못했다.
+- 확인한 사실: 승인 대기 중에 Claude Code의 `Notification`(권한 알림)이 오면 세션 상태가 `waiting_approval`에서 `waiting_input`으로 덮어써진다(`session.go`). 승인 카드는 broker가 관리하므로 계속 보인다. M2 상태 기계에서 다룬다.
+
+**4. OAuth 실제 연결**
+- **Railway: device flow 불가 → 인가 코드 + PKCE + loopback으로 변경(Q49 변경).** 메타데이터(`grant_types_supported`)에는 device_code가 있고 DCR도 그 grant로 등록해 주지만, device/auth는 `device_code is not allowed for this client`로 거부한다. redirect_uri 없이 등록한 클라이언트는 `redirect_uris must contain members`로 거부한다. 반면 native 클라이언트(`http://127.0.0.1/callback` 등록)는 포트가 다른 loopback 주소(`:54321/callback`)도 받아 준다(303 → 로그인). 등록되지 않은 주소는 400 `invalid_redirect_uri`다. 이전 빌드가 저장한 device flow용 setup(auth_url 없음)은 버리고 다시 등록한다.
+- Railway 메타데이터에 이제 `client_id_metadata_document_supported: true`가 있다(검증 결과 문서에는 CIMD 미지원으로 적혀 있음).
+- **Resend: 네트워크 문제로 보류.** 브라우저가 `resend.com`(Vercel 76.76.21.22)에 연결하지 못했다(ERR_CONNECTION_TIMED_OUT). 이 네트워크(en0 → 192.168.1.1)에서 76.76.21.22:443만 연결되지 않고, 76.76.21.21:443과 `api.resend.com`(Cloudflare)은 된다. farero 코드와는 무관하다.
