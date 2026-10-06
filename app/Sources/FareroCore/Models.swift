@@ -493,7 +493,31 @@ public struct AgentCfgStatus: Sendable, Equatable, Decodable {
     public var stalePath: Bool
     public var gatewayURL: String
     public var backupPath: String
+    /// A notice from farerod: set after it fixed farero's paths because the
+    /// app moved (Q63), or after `agentcfg.apply` when Claude Code rewrote
+    /// settings.json itself.
     public var message: String
+    public init(agent: String = "claude", cliFound: Bool = false, cliPath: String = "", version: String = "",
+                minVersion: String = "", versionOK: Bool = false, settingsPath: String = "",
+                hooksInstalled: Bool = false, allowInstalled: Bool = false, mcpInstalled: Bool = false,
+                hookPath: String = "", stalePath: Bool = false, gatewayURL: String = "", backupPath: String = "",
+                message: String = "") {
+        self.agent = agent
+        self.cliFound = cliFound
+        self.cliPath = cliPath
+        self.version = version
+        self.minVersion = minVersion
+        self.versionOK = versionOK
+        self.settingsPath = settingsPath
+        self.hooksInstalled = hooksInstalled
+        self.allowInstalled = allowInstalled
+        self.mcpInstalled = mcpInstalled
+        self.hookPath = hookPath
+        self.stalePath = stalePath
+        self.gatewayURL = gatewayURL
+        self.backupPath = backupPath
+        self.message = message
+    }
     enum CodingKeys: String, CodingKey {
         case agent, version, message
         case cliFound = "cli_found"

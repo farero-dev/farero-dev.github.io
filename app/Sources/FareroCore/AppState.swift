@@ -22,6 +22,9 @@ public enum AppAction: Sendable, Equatable {
     case answerRejected(approvalID: String)
     /// The answer could not be delivered (connection lost); buttons re-enable.
     case answerFailed(approvalID: String)
+    /// The user looked at 설정 > Claude Code, where farerod's `message` is
+    /// shown, so the menu stops repeating it.
+    case agentCfgNoticeSeen
 }
 
 /// The app's view of farerod, rebuilt from every `state.snapshot` and kept
@@ -39,6 +42,13 @@ public struct AppState: Sendable, Equatable {
     public var gateway = GatewayInfo()
     /// OAuth prompts in progress, by plugin.
     public var pluginPrompts: [String: PluginPrompt] = [:]
+    /// The latest Claude Code registration status (F-06), from replies to
+    /// `agentcfg.*` requests and from the `agentcfg.status` farerod pushes
+    /// after it fixed farero's paths (Q63). Not part of the snapshot, so it
+    /// survives reconnects until the next reply replaces it.
+    public var agentCfg: AgentCfgStatus?
+    /// The `agentCfg.message` the user has already seen in 설정 > Claude Code.
+    public var agentCfgSeenMessage = ""
 
     // Moments that drive short-lived character states (F-12).
     public var lastAllowedAt: Date?
@@ -58,6 +68,11 @@ public struct AppState: Sendable, Equatable {
 
     /// The card the shortcuts act on (the oldest).
     public var frontApproval: Approval? { approvals.first }
+
+    /// What the menu says about the Claude Code registration.
+    public var agentCfgAlerts: [AgentCfgAlert] {
+        AgentCfgAlert.alerts(for: agentCfg, seenMessage: agentCfgSeenMessage)
+    }
 
     public func pendingApprovalCount(sessionID: String) -> Int {
         approvals.filter { $0.sessionID == sessionID }.count
@@ -81,6 +96,11 @@ public struct AppState: Sendable, Equatable {
             answering = [:]
         case .ipc(.message(let m)):
             apply(m.payload, now: now)
+            // A push (no id) is a new event: farerod just fixed the paths,
+            // so its notice shows again even if the text repeats.
+            if case .agentCfgStatus = m.payload, m.id == nil { agentCfgSeenMessage = "" }
+        case .agentCfgNoticeSeen:
+            agentCfgSeenMessage = agentCfg?.message ?? ""
         case .answerSent(let id, let answer):
             if approvals.contains(where: { $0.id == id }) { answering[id] = answer }
         case .answerAccepted(let id, let answer):
@@ -138,7 +158,9 @@ public struct AppState: Sendable, Equatable {
             pluginPrompts[p.plugin] = p
         case .pluginList(let list):
             plugins = list
-        case .logResult, .policyState, .settings, .agentCfgStatus, .agentCfgPlan, .ok, .error, .unknown:
+        case .agentCfgStatus(let s):
+            agentCfg = s
+        case .logResult, .policyState, .settings, .agentCfgPlan, .ok, .error, .unknown:
             break
         }
     }

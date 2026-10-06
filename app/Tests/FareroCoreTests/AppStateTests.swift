@@ -181,6 +181,44 @@ struct AppStateTests {
         #expect(s.plugins.map(\.plugin) == ["github", "railway", "gmail"])
     }
 
+    @Test func agentCfgPushAndRepliesUpdateStatus() throws {
+        var s = Fixture.connected()
+        #expect(s.agentCfg == nil && s.agentCfgAlerts.isEmpty)
+
+        // The unsolicited push farerod sends after it fixed paths (Q63): no id.
+        let push = try IncomingMessage.decode(Data(#"{"type":"agentcfg.status","data":{"agent":"claude","cli_found":true,"cli_path":"/opt/homebrew/bin/claude","version":"2.1.287","min_version":"2.1.203","version_ok":true,"settings_path":"/Users/me/.claude/settings.json","hooks_installed":true,"allow_installed":true,"mcp_installed":true,"hook_path":"/Applications/Farero.app/Contents/MacOS/farero-hook","stale_path":false,"gateway_url":"http://127.0.0.1:61511/mcp","message":"farero 앱 위치가 바뀌어 Claude Code 설정의 경로를 새 위치로 고쳤습니다: /Applications/Farero.app/Contents/MacOS/farero-hook (이전 settings.json 백업: /x/backups/claude-settings-20261006-101500.000.json)"}}"#.utf8))
+        #expect(push.id == nil)
+        s.reduce(.ipc(.message(push)), now: t0)
+        #expect(s.agentCfg?.hookPath == "/Applications/Farero.app/Contents/MacOS/farero-hook")
+        #expect(s.agentCfg?.isFullyInstalled == true)
+        #expect(s.agentCfgAlerts.map(\.kind) == [.notice])
+        #expect(s.agentCfgAlerts.first?.detail.contains("claude-settings-20261006-101500.000.json") == true)
+
+        // Seen in 설정 > Claude Code: the menu stops repeating it, also when a
+        // later reply carries the same message (farerod keeps it in memory).
+        s.reduce(.agentCfgNoticeSeen, now: t0)
+        #expect(s.agentCfgAlerts.isEmpty)
+        guard case .agentCfgStatus(let st) = push.payload else { Issue.record("wrong payload"); return }
+        s.reduce(Fixture.msg(.agentCfgStatus(st), id: "r3"), now: t0)
+        #expect(s.agentCfgAlerts.isEmpty)
+
+        // A new push is a new event, even with the same text.
+        s.reduce(.ipc(.message(push)), now: t0)
+        #expect(s.agentCfgAlerts.map(\.kind) == [.notice])
+
+        // A reply replaces the status; reconnecting and a new snapshot keep it.
+        var old = st
+        old.message = ""
+        old.version = "2.1.150"
+        old.versionOK = false
+        s.reduce(Fixture.msg(.agentCfgStatus(old), id: "r4"), now: t0)
+        #expect(s.agentCfg == old)
+        s.reduce(.ipc(.disconnected(reason: "farerod가 연결을 닫음")), now: t0)
+        s.reduce(.ipc(.connected), now: t0)
+        s.reduce(Fixture.snapshot(), now: t0)
+        #expect(s.agentCfgAlerts.map(\.kind) == [.outdatedCLI])
+    }
+
     @Test func repliesAndUnknownMessagesChangeNothing() {
         let before = Fixture.connected(sessions: [Fixture.session("s1")])
         var s = before

@@ -84,6 +84,7 @@ struct CallPresentationTests {
         #expect(CallPresentation.reasonText("") == "")
         #expect(CallPresentation.reasonText("policy,tainted") == "분류표, 오염된 세션")
         #expect(CallPresentation.reasonText("app_not_running") == "앱이 실행 중이 아님")
+        #expect(CallPresentation.reasonText("answered_in_agent") == "터미널(또는 다른 훅)에서 먼저 답함")
         #expect(CallPresentation.reasonText("future_code") == "future_code")
         #expect(CallPresentation.reasonText("allow_session") == "이번 세션 동안 허용")
         #expect(CallPresentation.toolTitle(Call(plugin: "github", tool: "issue_write")) == "github · issue_write")
@@ -180,5 +181,60 @@ struct SettingsPayloadDecodingTests {
         let rows = LineDiff.rows(before: p.changes[0].before, after: p.changes[0].after)
         #expect(rows.filter { $0.kind == .added }.count == 6)
         #expect(rows.filter { $0.kind == .removed }.map(\.text) == [#"  "model": "opus""#])
+    }
+}
+
+@Suite("Claude Code alerts")
+struct AgentCfgAlertTests {
+    let notice = "farero 앱 위치가 바뀌어 Claude Code 설정의 경로를 새 위치로 고쳤습니다: /Applications/Farero.app/Contents/MacOS/farero-hook (이전 settings.json 백업: /x/backups/claude-settings-20261006-101500.000.json)"
+
+    func status(cliFound: Bool = true, version: String = "2.1.287", versionOK: Bool = true,
+                message: String = "") -> AgentCfgStatus {
+        AgentCfgStatus(cliFound: cliFound, cliPath: cliFound ? "/opt/homebrew/bin/claude" : "", version: version,
+                       minVersion: "2.1.203", versionOK: versionOK, hooksInstalled: true, allowInstalled: true,
+                       mcpInstalled: true, message: message)
+    }
+
+    @Test func nothingToSay() {
+        #expect(AgentCfgAlert.alerts(for: nil).isEmpty)
+        #expect(AgentCfgAlert.alerts(for: status()).isEmpty)
+        #expect(AgentCfgAlert.alerts(for: status(message: "  \n")).isEmpty)
+    }
+
+    @Test func pathFixNotice() {
+        let alerts = AgentCfgAlert.alerts(for: status(message: notice))
+        #expect(alerts == [AgentCfgAlert(kind: .notice,
+                                         title: "farero 앱 위치가 바뀌어 Claude Code 설정의 경로를 새 위치로 고쳤습니다",
+                                         detail: notice)])
+        // Seen in 설정 > Claude Code.
+        #expect(AgentCfgAlert.alerts(for: status(message: notice), seenMessage: notice).isEmpty)
+        // A notice without ": " is cut to fit the menu.
+        let long = String(repeating: "가", count: 80)
+        #expect(AgentCfgAlert.alerts(for: status(message: long)).first?.title == String(repeating: "가", count: 59) + "…")
+    }
+
+    @Test func outdatedClaudeCode() {
+        let alerts = AgentCfgAlert.alerts(for: status(version: "2.1.150", versionOK: false))
+        #expect(alerts.count == 1)
+        #expect(alerts.first?.kind == .outdatedCLI)
+        #expect(alerts.first?.title == "Claude Code 2.1.150 → 2.1.203 이상으로 업데이트 필요 (claude update)")
+        #expect(alerts.first?.detail == "설치된 Claude Code 2.1.150은(는) farero가 지원하는 최소 버전 2.1.203보다 낮습니다. 터미널에서 claude update로 업데이트하세요.")
+
+        // `claude --version` failed: the version is unknown.
+        let unknown = AgentCfgAlert.alerts(for: status(version: "", versionOK: false))
+        #expect(unknown.first?.title == "Claude Code 버전을 확인하지 못함 (2.1.203 이상 필요)")
+    }
+
+    @Test func bothOutdatedFirst() {
+        let alerts = AgentCfgAlert.alerts(for: status(version: "2.1.150", versionOK: false, message: notice))
+        #expect(alerts.map(\.kind) == [.outdatedCLI, .notice])
+        // Seeing the notice does not dismiss the version warning.
+        #expect(AgentCfgAlert.alerts(for: status(version: "2.1.150", versionOK: false, message: notice),
+                                     seenMessage: notice).map(\.kind) == [.outdatedCLI])
+    }
+
+    @Test func claudeCodeNotInstalled() {
+        // version_ok is false without a CLI; installing is the onboarding's job.
+        #expect(AgentCfgAlert.alerts(for: status(cliFound: false, version: "", versionOK: false)).isEmpty)
     }
 }

@@ -32,6 +32,7 @@ extension AppModel {
         case .stateSnapshot(let snap):
             Task { await refreshDaemonSettings() }
             checkDaemonVersion(snap.version)
+            fetchAgentCfgStatus()
         case .pluginPrompt(let p):
             // Open the browser only for a flow the user started here.
             if pluginActivity[p.plugin]?.connecting == true, !openedPromptURLs.contains(p.url),
@@ -109,6 +110,38 @@ extension AppModel {
             debugLog("update check failed: \(error)")
         }
         for f in onChange { f() }
+    }
+
+    // MARK: - Claude Code registration (F-06)
+
+    /// Fetches `agentcfg.status` after a snapshot, so an outdated Claude Code
+    /// shows in the menu without opening 설정. One request at a time: a
+    /// snapshot that arrives meanwhile (farerod re-sends one once its
+    /// gateway starts) queues a single follow-up.
+    func fetchAgentCfgStatus() {
+        guard !agentCfgFetching else {
+            agentCfgFetchAgain = true
+            return
+        }
+        agentCfgFetching = true
+        let client = self.client
+        Task { [weak self] in
+            let reply = try? await client.request(MessageType.agentCfgStatus, AgentRef())
+            guard let self else { return }
+            if let reply { dispatch(.ipc(.message(reply))) }
+            agentCfgFetching = false
+            if agentCfgFetchAgain {
+                agentCfgFetchAgain = false
+                fetchAgentCfgStatus()
+            }
+        }
+    }
+
+    /// Takes an `agentcfg.*` reply the Claude Code panel asked for. The panel
+    /// shows the reply's `message`, so the notice counts as seen.
+    func receiveAgentCfgReply(_ reply: IncomingMessage) {
+        dispatch(.ipc(.message(reply)))
+        dispatch(.agentCfgNoticeSeen)
     }
 
     // MARK: - Version mismatch (아키텍처 16장)

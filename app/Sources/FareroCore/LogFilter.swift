@@ -111,6 +111,7 @@ public enum CallPresentation {
             case "agent_request": "에이전트 권한 요청"
             case "allow_session": "이번 세션 동안 허용"
             case "app_not_running": "앱이 실행 중이 아님"
+            case "answered_in_agent": "터미널(또는 다른 훅)에서 먼저 답함"
             case "unclassified": "분류표에 없는 도구"
             default: String(code)
             }

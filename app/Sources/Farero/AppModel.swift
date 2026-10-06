@@ -37,6 +37,8 @@ final class AppModel {
     var pluginActivity: [String: PluginActivity] = [:]
     /// What the daemon version check did (shown in 데몬 상태).
     var versionNotice: String?
+    /// The selected tab of 설정, so the menu can open it on Claude Code.
+    var settingsTab = SettingsTab.initial
 
     var mode: NotchMode { NotchMode.resolve(state, hovering: hovering, pinned: pinned) }
 
@@ -47,6 +49,9 @@ final class AppModel {
     @ObservationIgnored var updateTask: Task<Void, Never>?
     @ObservationIgnored var reregistration = ReregistrationState.idle
     @ObservationIgnored var openedPromptURLs: Set<String> = []
+    /// An `agentcfg.status` fetch is in flight / another snapshot asked for one meanwhile.
+    @ObservationIgnored var agentCfgFetching = false
+    @ObservationIgnored var agentCfgFetchAgain = false
     /// AppKit controllers that follow the state (status item, panel).
     @ObservationIgnored var onChange: [() -> Void] = []
 

@@ -1,12 +1,20 @@
 import FareroCore
 import SwiftUI
 
+/// The tabs of 설정.
+enum SettingsTab: String {
+    case policy, general, claude
+
+    /// `FARERO_DEBUG_SETTINGS_TAB=policy|general|claude` picks the first tab (development).
+    static var initial: SettingsTab {
+        ProcessInfo.processInfo.environment["FARERO_DEBUG_SETTINGS_TAB"].flatMap(SettingsTab.init) ?? .policy
+    }
+}
+
 /// 설정: approval policy, general daemon settings, Claude Code registration.
 struct SettingsView: View {
     let model: AppModel
     @State private var agentCfg: AgentCfgModel
-    /// `FARERO_DEBUG_SETTINGS_TAB=policy|general|claude` picks the first tab (development).
-    @State private var tab = ProcessInfo.processInfo.environment["FARERO_DEBUG_SETTINGS_TAB"] ?? "policy"
 
     init(model: AppModel) {
         self.model = model
@@ -14,18 +22,19 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        TabView(selection: $tab) {
+        // The tab lives in AppModel so the menu can open 설정 on Claude Code.
+        TabView(selection: Binding(get: { model.settingsTab }, set: { model.settingsTab = $0 })) {
             PolicyTab(model: model)
                 .tabItem { Label("승인 정책", systemImage: "checklist") }
-                .tag("policy")
+                .tag(SettingsTab.policy)
             GeneralTab(model: model)
                 .tabItem { Label("일반", systemImage: "gearshape") }
-                .tag("general")
+                .tag(SettingsTab.general)
             ScrollView {
                 AgentCfgPanel(model: agentCfg).padding(20)
             }
             .tabItem { Label("Claude Code", systemImage: "terminal") }
-            .tag("claude")
+            .tag(SettingsTab.claude)
         }
         .frame(minWidth: 620, minHeight: 520)
     }

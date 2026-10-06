@@ -148,3 +148,69 @@ public enum ApprovalShortcut: String, Sendable, CaseIterable {
         return front.allowSession ? [.allow, .allowSession, .deny] : [.allow, .deny]
     }
 }
+
+/// What the menu bar says about the Claude Code registration, so the user
+/// learns it without opening 설정 (기능 명세서 F-06): an installed Claude
+/// Code older than farero supports ("v2.1.203 미만이면 업데이트를 안내한다"),
+/// and farerod's notice after it fixed farero's paths because the app moved
+/// (Q63).
+public struct AgentCfgAlert: Sendable, Equatable {
+    public enum Kind: Sendable, Equatable {
+        /// Claude Code is older than `min_version`.
+        case outdatedCLI
+        /// farerod's `message`, such as the automatic path fix.
+        case notice
+    }
+
+    public var kind: Kind
+    /// One line for the menu.
+    public var title: String
+    /// The whole text, for a tooltip.
+    public var detail: String
+
+    public init(kind: Kind, title: String, detail: String) {
+        self.kind = kind
+        self.title = title
+        self.detail = detail
+    }
+
+    /// The alerts for `status`, the outdated Claude Code first: it keeps
+    /// mattering until the user updates, while a notice is a one-off. A
+    /// notice equal to `seenMessage` (already seen in 설정 > Claude Code) is
+    /// left out. A missing Claude Code is not an alert here; the onboarding
+    /// covers installing it.
+    public static func alerts(for status: AgentCfgStatus?, seenMessage: String = "") -> [AgentCfgAlert] {
+        guard let s = status else { return [] }
+        var out: [AgentCfgAlert] = []
+        if s.cliFound && !s.versionOK {
+            out.append(outdated(version: s.version, minVersion: s.minVersion))
+        }
+        let message = s.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !message.isEmpty && s.message != seenMessage {
+            out.append(AgentCfgAlert(kind: .notice, title: summary(message), detail: message))
+        }
+        return out
+    }
+
+    static func outdated(version: String, minVersion: String) -> AgentCfgAlert {
+        let min = minVersion.isEmpty ? "지원 버전" : minVersion
+        let fix = "터미널에서 claude update로 업데이트하세요."
+        if version.isEmpty {
+            return AgentCfgAlert(kind: .outdatedCLI,
+                                 title: "Claude Code 버전을 확인하지 못함 (\(min) 이상 필요)",
+                                 detail: "Claude Code 버전을 확인하지 못했습니다. farero는 \(min) 이상에서 동작합니다. \(fix)")
+        }
+        return AgentCfgAlert(kind: .outdatedCLI,
+                             title: "Claude Code \(version) → \(min) 이상으로 업데이트 필요 (claude update)",
+                             detail: "설치된 Claude Code \(version)은(는) farero가 지원하는 최소 버전 \(min)보다 낮습니다. \(fix)")
+    }
+
+    /// The menu line for a notice: the text before the first ": " (farerod
+    /// puts paths after it), at most `maxLength` characters.
+    static func summary(_ message: String, maxLength: Int = 60) -> String {
+        var head = message
+        if let r = message.range(of: ": ") { head = String(message[..<r.lowerBound]) }
+        head = head.trimmingCharacters(in: .whitespacesAndNewlines)
+        return head.count > maxLength ? String(head.prefix(maxLength - 1)) + "…" : head
+    }
+}

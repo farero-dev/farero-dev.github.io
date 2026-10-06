@@ -48,6 +48,12 @@ final class WindowManager {
         window.makeKeyAndOrderFront(nil)
     }
 
+    /// Opens 설정 on `tab`.
+    func showSettings(_ tab: SettingsTab) {
+        model.settingsTab = tab
+        show(.settings)
+    }
+
     func close(_ kind: Kind) {
         windows[kind]?.close()
     }

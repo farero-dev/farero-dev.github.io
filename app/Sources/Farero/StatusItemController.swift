@@ -2,7 +2,8 @@ import AppKit
 import FareroCore
 
 /// The menu bar icon and its menu (기능 명세서 F-01): 설정, 플러그인 연결,
-/// 로그 검색, 데몬 상태, 종료, with the daemon connection shown on top.
+/// 로그 검색, 데몬 상태, 종료, with the daemon connection shown on top and,
+/// below it, what needs attention in the Claude Code registration (F-06).
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
     private let model: AppModel
@@ -25,15 +26,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     private func update() {
+        guard let button = item.button else { return }
         let state = model.character
-        guard state != shownCharacter, let button = item.button else { return }
-        shownCharacter = state
-        if let img = CharacterImages.statusItemImage(state) {
-            button.image = img
-        } else {
-            button.image = NSImage(systemSymbolName: "light.beacon.max", accessibilityDescription: "farero")
+        if state != shownCharacter {
+            shownCharacter = state
+            if let img = CharacterImages.statusItemImage(state) {
+                button.image = img
+            } else {
+                button.image = NSImage(systemSymbolName: "light.beacon.max", accessibilityDescription: "farero")
+            }
         }
-        button.toolTip = "farero · \(state.lighthouse.label)"
+        let tip = (["farero · \(state.lighthouse.label)"] + model.state.agentCfgAlerts.map(\.title))
+            .joined(separator: "\n")
+        if button.toolTip != tip { button.toolTip = tip }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -58,6 +63,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         let live = s.activeSessions.count
         menu.addItem(info("세션 \(live)개 · 승인 대기 \(s.approvals.count)개"))
+        for alert in s.agentCfgAlerts {
+            menu.addItem(alertItem(alert))
+        }
         if case .failed = registrar.status {
             menu.addItem(action("로그인 항목에서 데몬 허용…", #selector(openLoginItems)))
         }
@@ -83,12 +91,27 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private func info(_ title: String, symbol: String? = nil, tint: NSColor? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
-        if let symbol, let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
-                .applying(.init(paletteColors: [tint ?? .secondaryLabelColor]))
-            item.image = img.withSymbolConfiguration(config)
+        if let symbol {
+            item.image = Self.symbol(symbol, pointSize: 8, tint: tint ?? .secondaryLabelColor)
         }
         return item
+    }
+
+    /// A Claude Code registration alert; choosing it opens 설정 > Claude Code.
+    private func alertItem(_ alert: AgentCfgAlert) -> NSMenuItem {
+        let item = action(alert.title, #selector(openAgentCfgSettings))
+        item.toolTip = alert.detail
+        item.image = switch alert.kind {
+        case .outdatedCLI: Self.symbol("exclamationmark.triangle.fill", pointSize: 11, tint: .systemOrange)
+        case .notice: Self.symbol("info.circle.fill", pointSize: 11, tint: .systemBlue)
+        }
+        return item
+    }
+
+    private static func symbol(_ name: String, pointSize: CGFloat, tint: NSColor) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+            .applying(.init(paletteColors: [tint]))
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config)
     }
 
     private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
@@ -98,6 +121,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func openSettings() { windows.show(.settings) }
+    @objc private func openAgentCfgSettings() {
+        model.dispatch(.agentCfgNoticeSeen)
+        windows.showSettings(.claude)
+    }
     @objc private func openPlugins() { windows.show(.plugins) }
     @objc private func openLog() { windows.show(.logSearch) }
     @objc private func openDaemonStatus() { windows.show(.daemonStatus) }

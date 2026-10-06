@@ -23,6 +23,18 @@ struct PresentationTests {
         #expect(SessionDisplay.name(noCwd, now: Fixture.t0, calendar: seoul) == "abcdef12 · Codex")
     }
 
+    @Test func sessionStatusLabels() throws {
+        let labels = Dictionary(uniqueKeysWithValues: SessionStatus.allCases.map { ($0, $0.label) })
+        #expect(labels == [.running: "실행 중", .waitingInput: "입력 대기", .waitingApproval: "승인 대기",
+                           .ended: "종료됨", .unknown: "상태 불명"])
+        // From the wire values farerod sends; anything else reads as unknown.
+        for (raw, label) in [("running", "실행 중"), ("waiting_input", "입력 대기"), ("waiting_approval", "승인 대기"),
+                             ("ended", "종료됨"), ("unknown", "상태 불명"), ("paused", "상태 불명")] {
+            let status = try JSONDecoder().decode(SessionStatus.self, from: Data("\"\(raw)\"".utf8))
+            #expect(status.label == label, "\(raw)")
+        }
+    }
+
     @Test func reasonTexts() {
         #expect(ApprovalPresentation.reasonText("policy") == "분류표에서 승인이 필요한 도구")
         #expect(ApprovalPresentation.reasonText("tainted") == "이 세션이 신뢰할 수 없는 콘텐츠를 읽음")
