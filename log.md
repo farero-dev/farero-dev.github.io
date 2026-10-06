@@ -154,3 +154,8 @@ CI(GitHub Actions, macOS 15.7 / Xcode 16.4 / Swift 6.1.2)도 통과.
 - **Railway: device flow 불가 → 인가 코드 + PKCE + loopback으로 변경(Q49 변경).** 메타데이터(`grant_types_supported`)에는 device_code가 있고 DCR도 그 grant로 등록해 주지만, device/auth는 `device_code is not allowed for this client`로 거부한다. redirect_uri 없이 등록한 클라이언트는 `redirect_uris must contain members`로 거부한다. 반면 native 클라이언트(`http://127.0.0.1/callback` 등록)는 포트가 다른 loopback 주소(`:54321/callback`)도 받아 준다(303 → 로그인). 등록되지 않은 주소는 400 `invalid_redirect_uri`다. 이전 빌드가 저장한 device flow용 setup(auth_url 없음)은 버리고 다시 등록한다.
 - Railway 메타데이터에 이제 `client_id_metadata_document_supported: true`가 있다(검증 결과 문서에는 CIMD 미지원으로 적혀 있음).
 - **Resend: 네트워크 문제로 보류.** 브라우저가 `resend.com`(Vercel 76.76.21.22)에 연결하지 못했다(ERR_CONNECTION_TIMED_OUT). 이 네트워크(en0 → 192.168.1.1)에서 76.76.21.22:443만 연결되지 않고, 76.76.21.21:443과 `api.resend.com`(Cloudflare)은 된다. farero 코드와는 무관하다.
+- **GitHub: 통과.** `farero-dev` 조직에 OAuth App `farero`를 만들었다(Client ID `Ov23ctQpWIVLVb8jUWxb`, device flow 켬, 만료형 사용자 토큰 켬, callback `http://127.0.0.1/callback`). 저장소 변수 `FARERO_GITHUB_CLIENT_ID`에도 넣었다. device flow 토큰으로 원격 MCP가 동작한다: 게이트웨이를 거친 `github_get_me` → `seongj-un`(439ms, `auto_allowed`). 만료형 토큰의 자동 갱신은 8시간 뒤 확인이 필요하다.
+- **Railway: 통과(loopback).** DCR + 인가 코드 + PKCE + loopback으로 연결했다. 게이트웨이를 거친 `railway_whoami` → `seongj-un`(171ms, `auto_allowed`). 두 호출 모두 `PreToolUse`로 같은 세션에 연결됐다.
+- **Resend: 보류.** 네트워크 문제(76.76.21.22)가 그대로라 연결하지 못했다.
+- **보류한 항목(사용자 결정, 2026-10-06):** Resend 연결, Gmail(사용자 GCP 클라이언트 필요), 재부팅 뒤 데몬 유지, 단축키·터미널 점프 실제 조작. M1 작업을 먼저 진행한다.
+- 확인한 사실: farerod는 키체인 응답을 받기 전에는 소켓을 열지 않는다. ad-hoc 빌드를 업데이트할 때마다 키체인 확인 창이 뜨는데, 사용자가 답하기 전까지 앱은 "연결 끊김"이다.
