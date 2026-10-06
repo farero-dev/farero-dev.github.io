@@ -166,3 +166,54 @@ M1 코드(모노레포, farerod 소켓·SQLite, farero-hook, 메뉴바 앱, 빌�
 - **소켓을 키체인보다 먼저 연다:** ad-hoc 업데이트 뒤 키체인 창에 답하기 전까지 데몬이 통째로 멈추던 문제다. 게이트웨이 비밀값은 `core.New`가 아니라 `StartGateway`에서 읽고, 그 전에 나온 도구 목록은 보관했다가 게이트웨이를 만들 때 넣는다. farerod는 처리기 등록 → 소켓 열기 → 플러그인 복원·게이트웨이 시작(키체인) → 연결된 앱에 `state.snapshot` 재전송 순서로 시작한다. 경로 자동 수정(Q63)은 게이트웨이가 뜬 뒤 한다. 게이트웨이가 아직 없을 때 Claude Code 등록을 누르면 키체인 대기 중일 수 있다고 알린다. 테스트: 응답하지 않는 키체인을 흉내 낸 저장소로도 `core.New`가 바로 끝나고 앱이 연결되며, 게이트웨이가 뜨면 스냅샷을 다시 받는다.
 - **완료 기준 테스트:** 데몬이 없을 때(소켓 없음, 죽은 데몬의 소켓 파일만 남음) farero-hook이 1초 안에 exit 0으로 끝나고 결정을 출력하지 않는다. 헤더 헬퍼 모드는 `{}`를 출력한다(`cmd/farero-hook/main_test.go`).
 - e2e 스크립트는 소켓이 아니라 "gateway listening" 로그를 기다리게 바꿨다(소켓이 먼저 열리므로).
+
+### M2 세션 감시 (2026-10-06)
+M2 코드(훅 → 세션 상태 기계 → 앱 목록, `sessions`·`hook_events`, F-06 훅 등록)는 대부분 이미 있었다. 완료 기준을 확인하면서 실제 Claude Code의 훅 동작을 다시 재 보고, 그 결과로 상태 기계와 등록을 고쳤다. 브랜치는 develop(M1 마무리) 위에서 시작했다.
+
+**M2 실험 (Claude Code 2.1.290, pty로 대화형 실행, `--setting-sources project`).** 하네스와 원본은 `build/m2exp`(커밋 안 함).
+
+| 경우 | 오는 훅 이벤트 |
+|---|---|
+| 터미널 권한 프롬프트에서 No·Esc | **없음.** 기다리던 `PermissionRequest` 훅이 약 0.6초 뒤 SIGTERM을 받는다. transcript에 `[Request interrupted by user for tool use]`가 남는다 |
+| 터미널 권한 프롬프트에서 Yes | 훅은 끝나지 않고 계속 기다린다. 도구가 돌고 `PostToolUse`가 온다(M0 기록의 "터미널에서 먼저 답하면 훅이 끝난다"는 거부·Esc에만 맞음) |
+| 도구 실행 중·응답 중 Esc, Ctrl-C | **없음**(`Stop`도 없음). transcript에 `[Request interrupted by user]`만 남는다 |
+| 응답하지 않은 `PermissionRequest` | 6초 뒤 `Notification`(`notification_type: permission_prompt`) |
+| 입력 대기 | `Stop` 60초 뒤 `Notification`(`idle_prompt`). `title` 필드는 없다 |
+| API 오류 | `Stop` 대신 `StopFailure`(v2.1.78, `error: model_not_found` 등) |
+| `/compact` | `PreCompact` → `SubagentStop`(agent_type "") → `SessionStart`(source `compact`, 같은 세션) → `PostCompact`. `Stop`은 없다 |
+| 서브에이전트 | 같은 `session_id`에 `agent_id`·`agent_type`. 백그라운드 서브에이전트는 메인 `Stop` 뒤에도 `PermissionRequest`를 내고, 그동안 터미널에는 대화상자가 안 뜬다. 끝나면 합성 `UserPromptSubmit`(`<task-notification>`) → `Stop` |
+| 내부 fork(압축 요약, 프롬프트 제안 등) | `agent_id`만 있고 `agent_type` 키가 없는 `PreToolUse`. 그 도구는 실행되지 않는다 |
+| 종료 reason | `/exit`·Ctrl-C 두 번 `prompt_input_exit`, SIGHUP·SIGTERM·터미널 닫힘 `other`, `/clear`는 같은 프로세스에서 이전 세션 `clear` → 새 세션 `SessionStart(clear)` |
+| settings.json의 모르는 훅 이벤트 키 | 2.1.290은 경고 창을 띄우고 나머지는 적용한다. **2.1.101 전에는 파일 전체를 무시한다**(CHANGELOG) |
+
+**상태 기계 (`internal/session`, `internal/core`)**
+- `Notification`은 `notification_type`으로 나눈다: `permission_prompt` → 승인 대기(이전에는 입력 대기로 덮어써졌음), `idle_prompt`·MCP elicitation → 입력 대기, elicitation 완료 → 실행 중, 그 밖(`auth_success`, `claude agents`용 `agent_needs_input` 등)은 그대로. 필드가 없는 예전 버전은 승인 대기가 아닐 때만 입력 대기.
+- `StopFailure` → 입력 대기. F-06 훅 등록에 `StopFailure`를 더했다(10개).
+- `SessionStart(compact)`는 상태를 바꾸지 않는다. `AskUserQuestion`의 `PermissionRequest`는 입력 대기.
+- fork 이벤트(`agent_id`만 있음)는 상태와 게이트웨이 세션 연결에 쓰지 않는다.
+- 종료된 세션은 `SessionStart`나 다른 claude 프로세스(`--resume`)의 이벤트로만 다시 열린다. 같은 프로세스가 늦게 보낸 이벤트(SessionEnd는 비동기)는 무시한다.
+- 사용자가 턴을 멈춘 것(Esc·Ctrl-C·터미널 거부): (1) 기다리던 훅이 끊기면 메인 에이전트 세션을 입력 대기로, (2) 3초마다 실행 중·승인 대기 세션의 transcript 끝을 읽어, 마지막 이벤트 때의 파일 크기 뒤에 중단 표시가 있으면 입력 대기로 바꾼다. 쓰는 중인 마지막 줄은 판단하지 않는다.
+- 터미널에서 Yes로 답하면 같은 도구·같은 입력(정규화 해시)의 `PostToolUse`(또는 메인 `Stop`·`UserPromptSubmit`·`SessionEnd`)가 farero 카드를 거두고, 훅은 결정 없이 끝난다. 로그는 `cancelled` + `answered_in_agent`.
+- '알 수 없음': 에이전트 프로세스가 5초 넘게 없으면 바꾼다(아키텍처 16장의 "10분 무이벤트 + 프로세스 없음"에서 변경). `SessionEnd` 없이 끝나는 경우가 있고, PID 재사용은 프로세스 시작 시각으로 거른다. PID를 모르면 10분 무이벤트. claude가 먼저 끝나 launchd에 입양된 훅은 PID 0으로 보낸다.
+- 세션 저장·알림은 발행 잠금 안에서 최신 상태를 다시 읽어 보내서, 동시에 바뀌어도 DB와 앱이 옛 상태로 끝나지 않는다.
+
+**F-06 (`internal/agentcfg`)**
+- "설정 제거"는 처음 등록하기 전의 settings.json을 기억했다가, 남은 내용이 같으면(키 순서·서식 무시) 바이트 그대로 되돌린다. farero가 만든 파일이면 지운다. 그사이 사용자가 바꾼 내용은 유지한다.
+- Claude Code가 2.1.203 미만이면 계획·등록을 거부한다(2.1.101 전에는 새 이벤트 키 때문에 사용자 설정 전체가 무시될 수 있음).
+- 앱 위치가 바뀌었을 때 자동 수정(Q63)은 오래된 부분만, 경로만 고친다(새 이벤트를 더하지 않음). 이벤트가 늘어난 뒤에도 고친다(이전에는 훅을 아예 건너뜀). 알림에 백업 경로를 넣고, 고친 즉시 앱에 `agentcfg.status`를 보낸다. settings.json 쓰기는 잠금 + 같은 폴더 임시 파일.
+- 앱: 메뉴바에 Claude Code 버전 경고와 경로 수정 알림을 띄운다(설정 화면을 열지 않아도 보임). 연결·재연결 때 `agentcfg.status`를 한 번 묻는다.
+
+**리뷰(서브 에이전트) 반영:** 고아 훅의 PID 1, 이전 턴의 중단 표시 오인, 알림 뒤 중단 누락, 상태 발행 순서, 서브에이전트 훅 종료가 세션 전체를 바꾸던 것, 재사용 PID의 연결 매핑 삭제, settings.json 동시 쓰기, FixPath 반복 알림을 고쳤다. 시계가 뒤로 크게 바뀌면 살아 있는 세션이 잠시 '알 수 없음'이 될 수 있는 점은 남겼다(다음 이벤트에 돌아온다).
+
+**실제 검증 (`scripts/e2e-sessions.py`, Claude Code 2.1.290·2.1.291, haiku).** 개발 데몬과 격리된 Claude 설정 폴더에 실제로 등록한 뒤, 대화형 claude 세 개를 pty로 띄워 사용자처럼 입력한다(터미널 창 없음, 사용자 `~/.claude` 설정은 건드리지 않음). 최종 실행 68개 검사 모두 통과.
+- 등록: 훅 10개(StopFailure 포함, timeout 660), allow 규칙, MCP 항목 timeout 660000.
+- **M2 완료 기준:** 세션 두 개(alpha, beta)가 따로 보이고(cwd·에이전트·시작 시각·pid·tty), 둘 다 실행 중 → 입력 대기 → 실행 중 → 입력 대기로 오간다. "설정 제거" 뒤 settings.json이 등록 전 파일과 바이트 단위로 같고 MCP 항목도 지워진다.
+- Esc(훅 없음) → 입력 대기 0.4~2.9초. 터미널 No → 카드 철회·입력 대기 0.1초, `permission_prompt`(카드 뒤 6.0초)가 와도 승인 대기 유지. 터미널 Yes → 카드 철회, 명령 실행, 로그 `cancelled`/`answered_in_agent`.
+- `/exit` → `SessionEnd`로 종료(프로세스 종료보다 약 0.4초 먼저). kill -9(SessionEnd 없음) → 6.6~8.1초 뒤 '알 수 없음'.
+- 첫 실행에서 찾은 버그(터미널 No 뒤 `current_tool`이 남음)는 고쳤다.
+- 이번 검증에서는 실험의 "훅 대기 중 `/exit`하면 SessionEnd가 없다"가 재현되지 않았다. farerod가 `PostToolUse`·`Stop`에서 대기를 정리해 턴이 끝난 뒤까지 훅이 남지 않고, 도구 실행 중 `/exit`는 훅을 먼저 끝낸 뒤 SessionEnd를 보낸다.
+
+**M3로 넘긴 것 (에이전트 도구 승인·감사 로그)**
+- 터미널에서 Yes를 누른 뒤 명령이 끝나기(PostToolUse) 전에 앱에서 거부하면, 로그에 `denied`가 남지만 명령은 실행된다. 터미널 허용을 그 순간 알 신호가 없다.
+- 터미널에서 허용한 명령이 도는 중에 Esc·`/exit`로 훅이 끝나면 `cancelled`(이유 없음)로 남아, 터미널 거부와 구별되지 않는다.
+- 확인 못 한 것: 실제 `StopFailure` 이벤트로의 전환(단위 테스트만), 서브에이전트 대기 e2e, 앱 화면(노치 세션 목록)을 눈으로 확인하는 것. 앱 상태 처리는 FareroCore 테스트와 devctl(같은 IPC)로 확인했다.

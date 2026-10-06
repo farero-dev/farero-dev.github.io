@@ -37,6 +37,16 @@
 ```
 표시 이름은 `cwd`의 폴더 이름, 에이전트 종류, 시작 시각을 묶어 만든다(기능 명세서 5-1).
 
+`status`가 바뀌는 때(아키텍처 6장, Claude Code 2.1.290으로 확인):
+
+| 상태 | 들어가는 때 |
+|---|---|
+| `running` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse(Failure)`, 승인에 답한 뒤 |
+| `waiting_input` | `SessionStart`(compact 제외), `Stop`, `StopFailure`, `Notification`(`idle_prompt`, MCP elicitation), `AskUserQuestion`, 사용자가 턴을 멈춤(Esc·Ctrl-C·터미널 프롬프트에서 거부. 훅 이벤트가 없어서 transcript의 중단 표시와 대기 중이던 훅의 종료로 알아낸다) |
+| `waiting_approval` | `PermissionRequest`, `Notification`(`permission_prompt`), 게이트웨이 승인 요청 |
+| `ended` | `SessionEnd`. 종료된 세션은 `SessionStart`나 다른 에이전트 프로세스의 이벤트로만 다시 열린다 |
+| `unknown` | 에이전트 프로세스가 5초 넘게 없음(`SessionEnd` 없이 끝난 경우), PID를 모르면 10분 동안 이벤트 없음 |
+
 ### Approval (승인 카드)
 ```json
 {
@@ -80,7 +90,7 @@
 - `timeout`: 승인 대기 시간 초과
 - `blocked`: 정책으로 차단
 - `passthrough`: 앱이 없어 에이전트의 원래 프롬프트로 넘김
-- `cancelled`: 에이전트가 요청을 거둠
+- `cancelled`: 에이전트가 요청을 거둠. `reason`이 `answered_in_agent`면 farero가 답하기 전에 에이전트가 진행했다는 뜻이다(터미널 프롬프트에서 허용했거나 다른 훅이 답함). 비어 있으면 훅이 끝났다는 뜻이다(터미널에서 거부·Esc, 세션 종료)
 
 ### PluginState
 ```json
@@ -124,6 +134,7 @@
 | `call.logged` | Call | 감사 로그에 한 줄 추가됨(오류 캐릭터 상태 등에 사용) |
 | `plugin.updated` | PluginState | 플러그인 연결 상태 변경 |
 | `plugin.prompt` | `{"plugin","user_code","url","expires_at"}` | OAuth 진행 중 사용자가 할 일(device code 입력, 브라우저 열기) |
+| `agentcfg.status` | AgentCfgStatus | 앱 위치가 바뀌어 `farerod`가 Claude Code 설정의 경로를 스스로 고쳤을 때(Q63). `message`에 알림 문구와 백업 경로가 있다. 같은 이름의 요청 답장과 모양이 같다 |
 
 ### 앱 → 서버 요청
 
@@ -143,7 +154,7 @@
 | `agentcfg.status` | `{"agent":"claude"}` | `agentcfg.status`: AgentCfgStatus |
 | `agentcfg.plan` | `{"agent":"claude"}` | `agentcfg.plan`: `{"agent","changes":[{"path","before","after"}],"commands":[...]}`. 앱은 before/after diff를 보여 주고 확인을 받는다 |
 | `agentcfg.apply` | `{"agent":"claude"}` | `agentcfg.status`(`backup_path` 포함). 백업한 뒤 적용한다 |
-| `agentcfg.remove` | `{"agent":"claude"}` | `agentcfg.status`. farero가 넣은 항목만 지운다 |
+| `agentcfg.remove` | `{"agent":"claude"}` | `agentcfg.status`. farero가 넣은 항목만 지운다. 남은 내용이 처음 등록하기 전과 같으면 그때 파일을 바이트 그대로 되돌린다(farero가 만든 파일이면 지운다) |
 
 AgentCfgStatus:
 ```json

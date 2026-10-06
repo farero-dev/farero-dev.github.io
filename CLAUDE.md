@@ -63,7 +63,7 @@ MCP requests carry no session id, and the `headersHelper` environment does not i
 
 SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows. Call results are truncated to 16KB (Q46).
 
-## Facts verified in M0 that constrain the code
+## Facts verified in M0 and M2 that constrain the code
 
 - Without a per-server `timeout` in the MCP server entry, Claude Code gives up on a tool call after about 60 s. Register the gateway with `timeout: 660000` so a 10-minute approval can finish. Hook entries use `timeout: 660`.
 - `claude mcp add-json farero '<json>' --scope user` accepts `headersHelper` and `timeout`, so Claude Code writes its own `~/.claude.json` and farero does not have to edit that file by hand.
@@ -71,6 +71,11 @@ SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings wi
 - `PermissionRequest` does not fire for tools matched by `permissions.allow` (`mcp__farero__*`). It fires after `PreToolUse`.
 - Items written by `zalando/go-keyring` can be read by any process through `/usr/bin/security` without a prompt. So `secret` uses the Security framework (cgo), and only `farerod` touches Keychain. The hook gets the gateway secret over the socket (`headers.issue`).
 - Other apps can register their own `PermissionRequest` hooks in user settings, and their answer can override farero's.
+- Esc, Ctrl-C and "No" at the terminal's permission prompt send no hook event. Claude Code only writes `[Request interrupted by user…]` into the transcript, and "No"/Esc also kills a waiting `PermissionRequest` hook. "Yes" in the terminal does not end the hook: the tool runs and `PostToolUse` arrives while the hook still waits (`internal/core/agentwait.go`, `session.CheckInterrupts`).
+- `Notification` carries `notification_type` (`permission_prompt` about 6 s after an unanswered `PermissionRequest`, `idle_prompt` 60 s after `Stop`). An API error ends the turn with `StopFailure` instead of `Stop`.
+- Internal forks (compaction, prompt suggestions) send `PreToolUse` with `agent_id` but no `agent_type` key, for tools that never run. Real subagents carry both and share the parent's `session_id`.
+- Claude Code before 2.1.101 ignores the whole `settings.json` if it has a hook event name it does not know, so farero refuses to register with a Claude Code older than `MinClaudeVersion`.
+- A hook still running after claude exited is adopted by launchd: its parent PID is 1.
 
 ## Working rules for this repo
 

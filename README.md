@@ -36,11 +36,11 @@ If the app isn't running, Claude Code is never blocked:
 
 | Where | What |
 |---|---|
-| `~/.claude/settings.json` → `hooks` | `farero-hook` for SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, Stop and SessionEnd. Timeout 660 s, so a 10-minute approval can finish. |
+| `~/.claude/settings.json` → `hooks` | `farero-hook` for SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, Notification, Stop, StopFailure and SessionEnd. Timeout 660 s, so a 10-minute approval can finish. |
 | `~/.claude/settings.json` → `permissions.allow` | `mcp__farero__*`, so gateway tools are approved in farero instead of in Claude Code. |
 | user-scope MCP server `farero` | Added with `claude mcp add-json`: `http://127.0.0.1:<port>/mcp`, a `headersHelper`, and a 660 s timeout. |
 
-farero backs up the original file first. **Remove settings** deletes only what farero added.
+farero backs up the original file first. **Remove settings** deletes only what farero added; if nothing else changed in the meantime, the file is restored byte for byte. farero does not register with a Claude Code older than v2.1.203.
 
 ### Permissions farero asks for
 
@@ -85,6 +85,7 @@ FARERO_HOME=/tmp/fr FARERO_SOCKET=/tmp/fr/d.sock FARERO_CLAUDE_CONFIG_DIR=/tmp/f
 FARERO_SOCKET=/tmp/fr/d.sock swift run --package-path app Farero
 ```
 
+- `scripts/e2e.sh` (gateway, approvals) and `scripts/e2e-sessions.py` (session states with two interactive sessions) run a real Claude Code against a development farerod, isolated from your own config.
 - `docs/ipc.md` describes the socket protocol.
 - `policy/default.json` is the default tool classification.
 - `log.md` is the development log.
