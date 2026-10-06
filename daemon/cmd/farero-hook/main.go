@@ -43,12 +43,12 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	agentPID := agentProcess()
+	pid := agentProcess()
 	if *headers {
-		runHeaders(*agent, agentPID)
+		runHeaders(*agent, pid)
 		return
 	}
-	runHook(*agent, agentPID)
+	runHook(*agent, pid)
 }
 
 func runHook(agent string, pid int) {
@@ -122,11 +122,13 @@ func runHeaders(agent string, pid int) {
 }
 
 // agentProcess returns the agent's PID: our parent, or its parent when the
-// command was started through a shell.
-func agentProcess() int {
-	pid := os.Getppid()
+// command was started through a shell. It is 0 when the agent already
+// exited (the hook was adopted by launchd).
+func agentProcess() int { return agentPID(os.Getppid(), psInfo) }
+
+func agentPID(pid int, info func(int) (comm string, ppid int)) int {
 	for i := 0; i < 3 && pid > 1; i++ {
-		comm, ppid := psInfo(pid)
+		comm, ppid := info(pid)
 		base := comm[strings.LastIndex(comm, "/")+1:]
 		base = strings.TrimPrefix(base, "-")
 		switch base {
@@ -135,6 +137,9 @@ func agentProcess() int {
 			continue
 		}
 		break
+	}
+	if pid <= 1 {
+		return 0
 	}
 	return pid
 }
@@ -154,6 +159,9 @@ func psInfo(pid int) (comm string, ppid int) {
 
 // ttyOf returns the controlling terminal of pid ("ttys003"), or "".
 func ttyOf(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
 	out, err := exec.Command("/bin/ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return ""

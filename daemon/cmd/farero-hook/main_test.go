@@ -65,3 +65,28 @@ func TestHookExitsAtOnceWithoutDaemon(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentPID(t *testing.T) {
+	procs := map[int]struct {
+		comm string
+		ppid int
+	}{
+		500: {"/bin/zsh", 400},
+		400: {"claude", 300},
+		600: {"-bash", 1},
+	}
+	info := func(pid int) (string, int) { p := procs[pid]; return p.comm, p.ppid }
+	if got := agentPID(400, info); got != 400 {
+		t.Fatalf("direct child: %d", got)
+	}
+	if got := agentPID(500, info); got != 400 {
+		t.Fatalf("through a shell: %d", got)
+	}
+	// claude exited before the hook: launchd (1) adopted it or its shell.
+	if got := agentPID(1, info); got != 0 {
+		t.Fatalf("orphan: %d", got)
+	}
+	if got := agentPID(600, info); got != 0 {
+		t.Fatalf("orphan through a shell: %d", got)
+	}
+}

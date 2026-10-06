@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/farero-dev/farero/daemon/internal/broker"
@@ -72,6 +71,8 @@ type Core struct {
 	tools       []*mcp.Tool // the exposed list, kept for a gateway started later
 	pluginErr   map[string]string
 	toolIndex   map[string]exposedTool // exposed name -> plugin/tool
+
+	waits agentWaits // PermissionRequests waiting for the app
 }
 
 type exposedTool struct {
@@ -252,9 +253,15 @@ func (c *Core) ApprovalCancelled(id, reason string) {
 	c.hub.broadcast(ipc.TypeApprovalCancelled, ipc.ApprovalCancelled{ApprovalID: id, Reason: reason})
 }
 
-// SweepLoop periodically marks silent sessions with dead processes unknown.
+// sweepEvery is how often SweepLoop looks at sessions. Interrupts and exits
+// without a hook event show up within this time.
+const sweepEvery = 3 * time.Second
+
+// SweepLoop keeps session states right where Claude Code sends no hook
+// event: sessions whose agent process is gone become unknown, and turns
+// the user interrupted (Esc, Ctrl-C) wait for input.
 func (c *Core) SweepLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(sweepEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -262,15 +269,14 @@ func (c *Core) SweepLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			for _, pid := range c.sessions.Sweep(ctx, processAlive) {
-				c.corr.Forget(pid)
+				// A reused PID may belong to another claude by now.
+				if !processExists(pid) {
+					c.corr.Forget(pid)
+				}
 			}
+			c.sessions.CheckInterrupts(ctx)
 		}
 	}
-}
-
-func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
 }
 
 func sessionLabel(s model.Session) string {

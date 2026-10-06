@@ -100,7 +100,7 @@ func TestSweep(t *testing.T) {
 	m.Apply(ctx, model.AgentClaude, HookInput{SessionID: "dead", HookEventName: EventStop}, "", 100)
 	m.Apply(ctx, model.AgentClaude, HookInput{SessionID: "alive", HookEventName: EventStop}, "", 200)
 	m.Apply(ctx, model.AgentClaude, HookInput{SessionID: "ended", HookEventName: EventSessionEnd}, "", 300)
-	alive := func(pid int) bool { return pid == 200 }
+	alive := func(pid int, _ time.Time) bool { return pid == 200 }
 
 	if dead := m.Sweep(ctx, alive); len(dead) != 0 {
 		t.Fatalf("swept too early: %v", dead)
@@ -148,5 +148,91 @@ func TestDelete(t *testing.T) {
 	}
 	if _, err := st.Session(ctx, "claude:s1"); err != store.ErrNotFound {
 		t.Fatalf("still stored: %v", err)
+	}
+}
+
+// Hooks run as separate processes, and SessionEnd is asynchronous, so an
+// event of the exiting process can arrive after SessionEnd. It must not bring
+// the session back.
+func TestLateEventDoesNotReviveEnded(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventUserPromptSubmit, ""), "", 4242)
+	m.Apply(ctx, model.AgentClaude, ev(EventSessionEnd, ""), "", 4242)
+	for _, name := range []string{EventStop, EventPostToolUse, EventNotification} {
+		got, err := m.Apply(ctx, model.AgentClaude, ev(name, ""), "", 4242)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != model.StatusEnded {
+			t.Fatalf("%s revived the ended session: %s", name, got.Status)
+		}
+	}
+}
+
+// `claude --resume` runs a new process for the same session id, and the
+// daemon may have missed its SessionStart (for example while it restarted).
+func TestNewProcessRevivesEnded(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventSessionEnd, ""), "", 4242)
+	got, _ := m.Apply(ctx, model.AgentClaude, ev(EventUserPromptSubmit, ""), "", 5151)
+	if got.Status != model.StatusRunning || got.PID != 5151 {
+		t.Fatalf("resumed session: %+v", got)
+	}
+}
+
+func TestSessionStartRevivesEnded(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventSessionEnd, ""), "", 4242)
+	in := ev(EventSessionStart, "")
+	in.Source = "resume"
+	got, _ := m.Apply(ctx, model.AgentClaude, in, "", 4242)
+	if got.Status != model.StatusWaitingInput {
+		t.Fatalf("got %s", got.Status)
+	}
+}
+
+// Compaction can run in the middle of a turn; its SessionStart(compact) is
+// not a new session waiting for a prompt.
+func TestCompactKeepsStatus(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventPreToolUse, "Bash"), "", 4242)
+	in := ev(EventSessionStart, "")
+	in.Source = "compact"
+	got, _ := m.Apply(ctx, model.AgentClaude, in, "", 4242)
+	if got.Status != model.StatusRunning || got.CurrentTool != "Bash" {
+		t.Fatalf("got %s/%q", got.Status, got.CurrentTool)
+	}
+}
+
+// A PID that now belongs to a process started after the session's last
+// event is not the agent: macOS reuses PIDs.
+func TestSweepPassesLastEventTime(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	clock := time.Now()
+	m.now = func() time.Time { return clock }
+	m.Apply(ctx, model.AgentClaude, HookInput{SessionID: "s", HookEventName: EventStop}, "", 100)
+	last := clock
+	clock = clock.Add(UnknownAfter + time.Second)
+	var got time.Time
+	m.Sweep(ctx, func(pid int, before time.Time) bool { got = before; return false })
+	if !got.Equal(last) {
+		t.Fatalf("alive got %v, want the last event time %v", got, last)
+	}
+}
+
+// AskUserQuestion goes through PermissionRequest, but it is a question for
+// the user, not a permission: the session waits for input.
+func TestQuestionWaitsForInput(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventPreToolUse, "AskUserQuestion"), "", 4242)
+	got, _ := m.Apply(ctx, model.AgentClaude, ev(EventPermissionRequest, "AskUserQuestion"), "", 4242)
+	if got.Status != model.StatusWaitingInput || got.CurrentTool != "AskUserQuestion" {
+		t.Fatalf("got %s/%q", got.Status, got.CurrentTool)
 	}
 }
