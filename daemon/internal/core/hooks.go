@@ -57,6 +57,7 @@ func (c *Core) serveHook(ctx context.Context, conn *ipc.Conn, m ipc.Message) {
 		return
 	}
 	c.settleOnEvent(s.ID, in)
+	c.trackToolUse(ctx, s.ID, in)
 	switch in.HookEventName {
 	case session.EventPreToolUse:
 		if name, ok := strings.CutPrefix(in.ToolName, GatewayPrefix); ok {
@@ -85,17 +86,18 @@ func (c *Core) serveHook(ctx context.Context, conn *ipc.Conn, m ipc.Message) {
 				}
 			}
 		}()
-		d := c.decideAgentTool(hctx, s, in, w.settled.Load)
+		d := c.decideAgentTool(hctx, s, in, w)
 		conn.Send(ipc.TypeHookDecision, m.ID, d)
 		return
 	}
 	conn.Send(ipc.TypeHookAck, m.ID, nil)
 }
 
-// decideAgentTool handles a PermissionRequest (F-04). settled reports that
-// the agent went on without farero's answer (agentWait).
-func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.HookInput, settled func() bool) ipc.HookDecision {
+// decideAgentTool handles a PermissionRequest (F-04). w is its wait: settled
+// once the agent went on without farero's answer.
+func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.HookInput, w *agentWait) ipc.HookDecision {
 	start := time.Now()
+	logCtx := context.WithoutCancel(ctx)
 	input := in.ToolInput
 	if len(input) == 0 {
 		input = json.RawMessage(`{}`)
@@ -105,10 +107,17 @@ func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.
 		call.Decision = decision
 		call.Reason = reason
 		call.DurationMS = time.Since(start).Milliseconds()
-		c.logCall(context.WithoutCancel(ctx), call)
+		call.ID = c.logCall(logCtx, call)
 		if out.Behavior != ipc.BehaviorNone {
-			c.sessions.SetStatus(context.WithoutCancel(ctx), s.ID, model.StatusRunning)
+			c.sessions.SetStatus(logCtx, s.ID, model.StatusRunning)
 		}
+		return out
+	}
+	// refuse logs a deny that the agent ignores if the user already allowed
+	// in the terminal; watchRefusal corrects the row when the tool runs.
+	refuse := func(decision, msg string) ipc.HookDecision {
+		out := finish(decision, "", ipc.HookDecision{Behavior: ipc.BehaviorDeny, Reason: msg})
+		c.watchRefusal(logCtx, w, call.ID)
 		return out
 	}
 
@@ -127,6 +136,14 @@ func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.
 		Kind: model.KindAgent, SessionID: s.ID, SessionLabel: sessionLabel(s), Agent: s.Agent,
 		Tool: in.ToolName, Input: input, Reasons: d.Reasons, AllowSession: d.AllowSession,
 	})
+	if res.Outcome != broker.UIGone && w.settled.Load() {
+		// The agent went on before farero's answer reached it (the user
+		// answered in the terminal). A session grant still counts.
+		if res.Outcome == broker.Answered && res.Answer == model.AnswerAllowSession {
+			c.policy.GrantAgent(s.ID, in.ToolName, input)
+		}
+		return finish(model.DecisionCancelled, model.ReasonAnsweredInAgent, ipc.HookDecision{Behavior: ipc.BehaviorNone})
+	}
 	switch res.Outcome {
 	case broker.Answered:
 		switch res.Answer {
@@ -136,16 +153,13 @@ func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.
 		case model.AnswerAllow:
 			return finish(model.DecisionUserAllowed, "", ipc.HookDecision{Behavior: ipc.BehaviorAllow})
 		default:
-			return finish(model.DecisionDenied, "", ipc.HookDecision{Behavior: ipc.BehaviorDeny, Reason: "사용자가 거부함"})
+			return refuse(model.DecisionDenied, "사용자가 거부함")
 		}
 	case broker.TimedOut:
-		return finish(model.DecisionTimeout, "", ipc.HookDecision{Behavior: ipc.BehaviorDeny, Reason: "승인 대기 시간 초과"})
+		return refuse(model.DecisionTimeout, "승인 대기 시간 초과")
 	case broker.UIGone:
 		return finish(model.DecisionPassthrough, model.ReasonAppNotRunning, ipc.HookDecision{Behavior: ipc.BehaviorNone})
 	default:
-		if settled() {
-			return finish(model.DecisionCancelled, model.ReasonAnsweredInAgent, ipc.HookDecision{Behavior: ipc.BehaviorNone})
-		}
 		// The hook was stopped: the user denied or pressed Esc at the
 		// terminal prompt, which sends no hook event (M2 실험), or the
 		// session is ending (SessionEnd wins over this). A background

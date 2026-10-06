@@ -3,6 +3,7 @@
 // cards automatically. It is not shipped in the app bundle.
 //
 //	farero-devctl watch [-answer allow|allow_session|deny]
+//	farero-devctl answer <approval id> allow|allow_session|deny
 //	farero-devctl log [-q text] [-n 20]
 //	farero-devctl policy
 //	farero-devctl agentcfg status|plan|apply|remove
@@ -23,7 +24,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|log|policy")
+		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg")
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -61,6 +62,13 @@ func main() {
 				conn.Send(ipc.TypeApprovalResponse, "auto", ipc.ApprovalResponse{ApprovalID: a.ID, Answer: ans})
 			}
 		}
+	case "answer":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: farero-devctl answer <approval id> allow|allow_session|deny")
+			os.Exit(2)
+		}
+		conn.Send(ipc.TypeApprovalResponse, "r", ipc.ApprovalResponse{ApprovalID: args[0], Answer: args[1]})
+		printReply(conn, "r")
 	case "log":
 		fs := flag.NewFlagSet("log", flag.ExitOnError)
 		q := fs.String("q", "", "search text")

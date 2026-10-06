@@ -73,6 +73,7 @@ type Core struct {
 	toolIndex   map[string]exposedTool // exposed name -> plugin/tool
 
 	waits agentWaits // PermissionRequests waiting for the app
+	uses  toolUses   // tool_use_ids, for answers the agent did not follow
 }
 
 type exposedTool struct {
@@ -294,7 +295,8 @@ func (c *Core) resultLimit(ctx context.Context) int {
 	return store.DefaultResultLimit
 }
 
-func (c *Core) logCall(ctx context.Context, call model.Call) {
+// logCall writes an audit log row and returns its id (0 if it failed).
+func (c *Core) logCall(ctx context.Context, call model.Call) int64 {
 	limit := c.resultLimit(ctx)
 	call.ResultBytes = len(call.ResultText)
 	call.ResultText = store.TruncateUTF8(call.ResultText, limit)
@@ -304,10 +306,11 @@ func (c *Core) logCall(ctx context.Context, call model.Call) {
 	id, err := c.store.InsertCall(ctx, call)
 	if err != nil {
 		c.log.Error("audit log", "err", err)
-		return
+		return 0
 	}
 	call.ID = id
 	c.hub.broadcast(ipc.TypeCallLogged, trimForBroadcast(call))
+	return id
 }
 
 // Broadcast limits: call.logged tells the app that something happened (for

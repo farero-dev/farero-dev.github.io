@@ -45,6 +45,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	return res.LastInsertId()
 }
 
+// SetCallDecision rewrites a row's decision and reason, for a decision that
+// turned out not to be the one the agent followed.
+func (s *Store) SetCallDecision(ctx context.Context, id int64, decision, reason string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE calls SET decision = ?, reason = ? WHERE id = ?`, decision, reason, id)
+	return err
+}
+
 // CallFilter selects audit log rows. Zero values mean "any".
 type CallFilter struct {
 	Query     string    `json:"query"`

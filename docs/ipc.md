@@ -92,6 +92,8 @@
 - `passthrough`: 앱이 없어 에이전트의 원래 프롬프트로 넘김
 - `cancelled`: 에이전트가 요청을 거둠. `reason`이 `answered_in_agent`면 farero가 답하기 전에 에이전트가 진행했다는 뜻이다(터미널 프롬프트에서 허용했거나 다른 훅이 답함). 비어 있으면 훅이 끝났다는 뜻이다(터미널에서 거부·Esc, 세션 종료)
 
+에이전트 도구 줄(`kind: agent`)의 `denied`·`timeout`은 나중에 `cancelled`/`answered_in_agent`로 바뀔 수 있다. 사용자가 터미널에서 먼저 허용한 뒤 farero가 거부(또는 시간 초과)하면 Claude Code는 늦게 온 훅의 답을 무시하고 도구를 실행한다. 그 도구의 `PostToolUse`(같은 `tool_use_id`)가 오면 `farerod`가 그 줄을 고친다. 이때 알림은 따로 보내지 않는다
+
 ### PluginState
 ```json
 {"plugin": "github", "status": "connected", "account_label": "octocat",
