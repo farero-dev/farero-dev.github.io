@@ -141,12 +141,10 @@ struct DaemonStep: View {
                 }
             }
             .formStyle(.grouped)
-            if registrar.status == .requiresApproval {
-                Banner(text: "macOS가 farero 데몬의 실행 허락을 기다립니다. 시스템 설정 > 일반 > 로그인 항목에서 Farero를 켜세요. 켜면 곧바로 연결됩니다.",
-                       style: .warning)
+            if case .failed(let message) = registrar.status {
+                Banner(text: "데몬을 시작하지 못했습니다: \(message)\n시스템 설정 > 일반 > 로그인 항목에서 farero의 백그라운드 실행이 꺼져 있다면 켜 주세요.",
+                       style: .error)
                 Button("로그인 항목 설정 열기") { registrar.openLoginItemsSettings() }
-            } else if case .failed(let message) = registrar.status {
-                Banner(text: "데몬을 등록하지 못했습니다: \(message)", style: .error)
             } else if !model.state.isConnected {
                 Banner(text: "데몬에 연결하는 중입니다. 계속 연결되지 않으면 앱을 다시 실행해 보세요.", style: .info)
             } else {

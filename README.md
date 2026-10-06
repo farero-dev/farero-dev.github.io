@@ -29,7 +29,7 @@ If the app isn't running, Claude Code is never blocked:
 
 1. Download `Farero-<version>.zip` from [Releases](https://github.com/farero-dev/farero-dev.github.io/releases), unzip it, and move `Farero.app` to `/Applications`.
 2. The app is not notarized yet, so macOS blocks the first launch. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**. Since macOS Sequoia, Control-click › Open no longer bypasses this.
-3. Allow farero's background item when macOS asks (**System Settings › General › Login Items**). This is the `farerod` daemon. Because the app is ad-hoc signed, macOS may ask again after an update or a reboot. farero detects this and shows where to turn it back on.
+3. On first launch farero installs its daemon, `farerod`, as a LaunchAgent (`~/Library/LaunchAgents/dev.farero.farerod.plist`), and macOS shows a "Background Items Added" notification. Keep it on in **System Settings › General › Login Items**. If it is off, farero tells you and opens that page.
 4. In the app, register farero with Claude Code. farero shows a diff of the changes and asks for confirmation before writing anything.
 
 ### What farero changes in Claude Code

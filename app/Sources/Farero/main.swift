@@ -20,7 +20,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.start()
 
         // Register farerod as a LaunchAgent (skipped in development runs).
-        model.registrar.registerIfNeeded()
+        model.registrar.registerIfNeeded { [model] in
+            model.registrationLabel = model.registrar.status.label
+        }
         model.registrationLabel = model.registrar.status.label
         windows.showOnboardingIfFirstLaunch()
         windows.openDebugWindows()

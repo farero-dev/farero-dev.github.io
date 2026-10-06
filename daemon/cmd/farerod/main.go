@@ -31,7 +31,7 @@ var version = "dev"
 // keychainService is the Keychain service name for farerod's items.
 const keychainService = "dev.farero.farerod"
 
-// launchAgentLabel is the LaunchAgent label (app/Resources/LaunchAgents).
+// launchAgentLabel is the LaunchAgent label (LaunchAgent.swift in the app).
 const launchAgentLabel = "dev.farero.farerod"
 
 func main() {

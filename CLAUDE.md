@@ -34,7 +34,7 @@ go vet ./...
 
 There are three processes. All state lives in the daemon (Q40):
 
-- **`farerod`** (Go, `daemon/cmd/farerod`): a LaunchAgent registered by the app through `SMAppService`. It owns sessions, the approval broker, the policy engine, the MCP gateway (Streamable HTTP on `127.0.0.1:<port fixed on first run>`), upstream plugin connections, SQLite and Keychain.
+- **`farerod`** (Go, `daemon/cmd/farerod`): a user LaunchAgent (`~/Library/LaunchAgents/dev.farero.farerod.plist`) that the app writes and loads with `launchctl`. Not `SMAppService`: with ad-hoc signing it ties the job to farerod's code hash, and launchd refuses the farerod of every updated bundle. It owns sessions, the approval broker, the policy engine, the MCP gateway (Streamable HTTP on `127.0.0.1:<port fixed on first run>`), upstream plugin connections, SQLite and Keychain.
 - **`farero-hook`** (Go, `daemon/cmd/farero-hook`): Claude Code runs it for every hook event (`farero-hook --agent claude`) and as the MCP `headersHelper` (`--headers`). It forwards to `farerod` over the Unix socket. If the socket is unreachable it exits 0 with no output, so the agent is never blocked.
 - **App** (Swift, `app/`, planned as a SwiftPM package): a UI client of `farerod` over the same socket. It handles the notch and menu bar, approval cards, settings, log search and terminal jump.
 

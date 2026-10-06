@@ -126,7 +126,7 @@ struct DaemonStatusView: View {
             LabeledContent("세션") { Text("진행 중 \(s.activeSessions.count)개 · 전체 \(s.sessions.count)개") }
             LabeledContent("승인 대기") { Text("\(s.approvals.count)개") }
             LabeledContent("로그인 항목") { Text(model.registrationLabel) }
-            if registrar.status == .requiresApproval || registrar.status == .notRegistered {
+            if registrar.status.needsAttention {
                 Button("로그인 항목 설정 열기") { registrar.openLoginItemsSettings() }
             }
         }

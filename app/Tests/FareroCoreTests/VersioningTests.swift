@@ -87,3 +87,34 @@ struct DaemonVersionCheckTests {
         #expect(!DaemonVersionCheck.needsReregistration(appVersion: "__VERSION__", daemonVersion: "0.1.0"))
     }
 }
+
+/// With ad-hoc signing, replacing the app bundle (an update or a rebuild)
+/// invalidates the LaunchAgent's background item, and launchd can no longer
+/// start farerod (M0, 2026-10-06). The app cannot learn the daemon version
+/// then, so it compares the farerod it registered with the one it ships.
+@Suite("Daemon registration identity")
+struct DaemonRegistrationCheckTests {
+    let current = DaemonRegistrationCheck.identity(
+        executablePath: "/Applications/Farero.app/Contents/MacOS/farerod", cdhash: Data([0x0a, 0xff, 0x01]))
+
+    @Test func identityIsPathAndHexHash() {
+        #expect(current == "/Applications/Farero.app/Contents/MacOS/farerod#0aff01")
+    }
+
+    @Test func changedOrUnknownRegistrationNeedsReregistration() {
+        let rebuilt = DaemonRegistrationCheck.identity(
+            executablePath: "/Applications/Farero.app/Contents/MacOS/farerod", cdhash: Data([0x0b]))
+        let moved = DaemonRegistrationCheck.identity(
+            executablePath: "/Users/me/Applications/Farero.app/Contents/MacOS/farerod", cdhash: Data([0x0a, 0xff, 0x01]))
+        #expect(DaemonRegistrationCheck.needsReregistration(recorded: rebuilt, current: current))
+        #expect(DaemonRegistrationCheck.needsReregistration(recorded: moved, current: current))
+        // Registered by a build that did not record it.
+        #expect(DaemonRegistrationCheck.needsReregistration(recorded: nil, current: current))
+    }
+
+    @Test func sameOrUnreadableIdentityKeepsRegistration() {
+        #expect(!DaemonRegistrationCheck.needsReregistration(recorded: current, current: current))
+        // The signature could not be read: do not churn the registration.
+        #expect(!DaemonRegistrationCheck.needsReregistration(recorded: "x", current: nil))
+    }
+}

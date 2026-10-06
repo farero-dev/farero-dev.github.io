@@ -151,3 +151,26 @@ public enum DaemonVersionCheck {
         return v.hasPrefix("v") ? String(v.dropFirst()) : v
     }
 }
+
+/// Whether the LaunchAgent must be registered again because the farerod it
+/// runs is not the one this bundle ships. With ad-hoc signing (Q47) the
+/// background item is tied to the executable's code hash: replacing the app
+/// bundle (an update or a rebuild) invalidates it, and launchd then fails to
+/// start farerod ("needs LWCR update", EX_CONFIG; M0 2026-10-06). The daemon
+/// never comes up to report its version, so DaemonVersionCheck cannot catch
+/// this.
+public enum DaemonRegistrationCheck {
+    /// The registered farerod: its path (moving the app changes it) and its
+    /// code directory hash.
+    public static func identity(executablePath: String, cdhash: Data) -> String {
+        executablePath + "#" + cdhash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A missing record means a build that did not record it registered the
+    /// agent, so it is registered once more. An unreadable signature
+    /// (`current` nil) keeps the registration as it is.
+    public static func needsReregistration(recorded: String?, current: String?) -> Bool {
+        guard let current else { return false }
+        return recorded != current
+    }
+}

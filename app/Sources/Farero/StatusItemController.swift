@@ -58,7 +58,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         let live = s.activeSessions.count
         menu.addItem(info("세션 \(live)개 · 승인 대기 \(s.approvals.count)개"))
-        if registrar.status == .requiresApproval {
+        if case .failed = registrar.status {
             menu.addItem(action("로그인 항목에서 데몬 허용…", #selector(openLoginItems)))
         }
         if let notice = model.versionNotice {
