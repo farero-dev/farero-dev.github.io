@@ -38,8 +38,9 @@ import signal
 import sys
 import time
 
-from e2elib import (DOWN, ENTER, ESC, ROOT, Abort, Agent, Harness, descendants, find_row, prepare,
-                    print_daemon_warnings, ready, selected_option, step_register, step_remove, wait_card)
+from e2elib import (ENTER, ESC, ROOT, Abort, Agent, Harness, descendants, find_row, prepare,
+                    print_daemon_warnings, ready, select_option, selected_option, step_register, step_remove,
+                    wait_card)
 
 E = os.environ.get("E2E_DIR", "/tmp/frm2")
 WORK = os.path.join(ROOT, "build", "e2e-sessions")
@@ -162,11 +163,7 @@ def step_deny(h, beta):
     h.check(h.status(beta.sid) == "waiting_approval" and statuses <= {"waiting_approval"},
             "beta: still waiting_approval after the permission_prompt Notification",
             f"statuses since card: {statuses}")
-    beta.send(DOWN)
-    h.sleep(0.4)
-    beta.send(DOWN)
-    h.sleep(0.6)
-    sel = selected_option(beta)
+    sel = select_option(h, beta, "No")
     beta.save_screen("No selected")
     if not h.check(sel and sel[1].startswith("No"), "beta: 'No' selected in the terminal prompt", f"selected {sel}"):
         return

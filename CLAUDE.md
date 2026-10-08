@@ -28,7 +28,7 @@ go generate ./internal/policy                         # re-copy policy/default.j
 go vet ./...
 ```
 
-End-to-end checks with a real, interactive Claude Code (headless pseudo-terminals, an isolated Claude config dir, a dev farerod under `/tmp`; they take several minutes): `scripts/e2e-sessions.py` (M2 session watching), `scripts/e2e-approvals.py` (M3 agent tool approval; `E2E_APPROVAL_TIMEOUT=10m` for the real deadline), `scripts/e2e.sh` (`claude -p` through the gateway). The shared harness is `scripts/e2elib.py`.
+End-to-end checks with a real, interactive Claude Code (headless pseudo-terminals, an isolated Claude config dir, a dev farerod under `/tmp`; they take several minutes): `scripts/e2e-sessions.py` (M2 session watching), `scripts/e2e-approvals.py` (M3 agent tool approval; `E2E_APPROVAL_TIMEOUT=10m` for the real deadline), `scripts/e2e-gateway.py` (M4 gateway with the fake `dev` plugin; `E2E_APPROVAL_TIMEOUT=3m` or `10m` runs only the long-wait steps), `scripts/e2e.sh` (`claude -p` through the gateway). The shared harness is `scripts/e2elib.py`. `farero-devctl` stands in for the app (watch, answer cards, log, `policy set`).
 
 `experiments/` is a separate Go module (`cd experiments && go build -o bin/<name> ./<dir>`). It holds M0 throwaway code and must never be imported by `daemon/` (Q67).
 
@@ -65,11 +65,13 @@ MCP requests carry no session id, and the `headersHelper` environment does not i
 
 SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows. Call results are truncated to 16KB (Q46).
 
-## Facts verified in M0, M2 and M3 that constrain the code
+## Facts verified in M0, M2, M3 and M4 that constrain the code
 
 - Without a per-server `timeout` in the MCP server entry, Claude Code gives up on a tool call after about 60 s. Register the gateway with `timeout: 660000` so a 10-minute approval can finish. Hook entries use `timeout: 660`.
 - `claude mcp add-json farero '<json>' --scope user` accepts `headersHelper` and `timeout`, so Claude Code writes its own `~/.claude.json` and farero does not have to edit that file by hand.
-- Claude Code 2.1.287 first tries `server/discover` (2026-07-28) and then falls back to `initialize` (2025-11-25). The gateway must serve both, which the Go SDK does.
+- The gateway serves MCP 2026-07-28 and the initialize-based versions (기능 명세서 5-6). Go MCP SDK v1.8.0 serves 2026-07-28 only from a stateless handler, which gives initialize clients no session (no `tools/list_changed`), so `internal/gateway` routes by header between a stateless and a stateful handler on the same server. Claude Code 2.1.293 uses `server/discover` + `subscriptions/listen` (2026-07-28) and re-reads `tools/list` within 0.05 s of a change; with the old SDK it fell back to `initialize` 2025-11-25.
+- Claude Code moves an MCP call still running after 120 s to the background (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`, off in `-p`): PostToolUse and Stop arrive while the approval card is still open, and the answer reaches the model later as a `<task-notification>` turn. farero keeps Claude Code's default (Q83). A session shows `waiting_approval` while it has an open card, whatever its hook events say (`session.ApprovalOpened/Closed`).
+- The headersHelper runs once per claude process; its connection id stays the same for the whole session, also across a farerod restart (Claude Code reopens `subscriptions/listen` on it and does not run the helper again).
 - `PermissionRequest` does not fire for tools matched by `permissions.allow` (`mcp__farero__*`). It fires after `PreToolUse`.
 - Items written by `zalando/go-keyring` can be read by any process through `/usr/bin/security` without a prompt. So `secret` uses the Security framework (cgo), and only `farerod` touches Keychain. The hook gets the gateway secret over the socket (`headers.issue`).
 - Other apps can register their own `PermissionRequest` hooks in user settings, and their answer can override farero's.
@@ -79,6 +81,7 @@ SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings wi
 - Internal forks (compaction, prompt suggestions) send `PreToolUse` with `agent_id` but no `agent_type` key, for tools that never run. Real subagents carry both and share the parent's `session_id`.
 - Claude Code before 2.1.101 ignores the whole `settings.json` if it has a hook event name it does not know, so farero refuses to register with a Claude Code older than `MinClaudeVersion`.
 - A hook still running after claude exited is adopted by launchd: its parent PID is 1.
+- Claude Code 2.1.293 may start in auto mode, where its classifier allows commands without a `PermissionRequest` (no farero card), and its permission prompt gained "Yes, and switch to auto mode" (so "No" moved). The e2e scripts pass `--permission-mode default` and pick prompt options by text.
 
 ## Working rules for this repo
 
