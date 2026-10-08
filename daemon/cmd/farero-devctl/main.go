@@ -5,7 +5,7 @@
 //	farero-devctl watch [-answer allow|allow_session|deny]
 //	farero-devctl answer <approval id> allow|allow_session|deny
 //	farero-devctl log [-q text] [-n 20]
-//	farero-devctl policy
+//	farero-devctl policy [set <plugin> <tool> [auto|ask|block]]  (no level: back to the default)
 //	farero-devctl agentcfg status|plan|apply|remove
 package main
 
@@ -77,7 +77,20 @@ func main() {
 		conn.Send(ipc.TypeLogQuery, "q", store.CallFilter{Query: *q, Limit: *n})
 		printReply(conn, "q")
 	case "policy":
-		conn.Send(ipc.TypePolicyGet, "p", nil)
+		if len(args) == 0 {
+			conn.Send(ipc.TypePolicyGet, "p", nil)
+			printReply(conn, "p")
+			break
+		}
+		if args[0] != "set" || len(args) < 3 || len(args) > 4 {
+			fmt.Fprintln(os.Stderr, "usage: farero-devctl policy [set <plugin> <tool> [auto|ask|block]]")
+			os.Exit(2)
+		}
+		level := ""
+		if len(args) == 4 {
+			level = args[3]
+		}
+		conn.Send(ipc.TypePolicySet, "p", ipc.PolicySet{Plugin: args[1], Tool: args[2], Level: level})
 		printReply(conn, "p")
 	case "agentcfg":
 		op := "status"

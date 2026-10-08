@@ -298,7 +298,12 @@ class Agent:
     harness thread (select), so the master is never closed under a blocked
     read (that can wedge the process on macOS)."""
 
-    def __init__(self, h, name, extra_args=()):
+    def __init__(self, h, name, extra_args=(), settings=None, permission_mode="default"):
+        """settings: another settings.json for this claude (default: the
+        generated one in the isolated Claude config dir). permission_mode:
+        Claude Code 2.1.293 starts in "auto mode", where a classifier allows
+        many commands without a PermissionRequest; the checks need the
+        normal prompts (None: leave Claude Code's own choice)."""
         self.h, self.name = h, name
         self.cwd = os.path.join(h.work, name)
         self.screen = Screen(COLS, ROWS)
@@ -307,8 +312,9 @@ class Agent:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
         self.tty = os.path.basename(os.ttyname(slave))
         cmd = [CLAUDE, "--model", MODEL, "--setting-sources", "project",
-               "--settings", os.path.join(h.e, "claude", "settings.json"),
-               "--strict-mcp-config", "--mcp-config", os.path.join(h.e, "mcp.json"), *extra_args]
+               "--settings", settings or os.path.join(h.e, "claude", "settings.json"),
+               "--strict-mcp-config", "--mcp-config", os.path.join(h.e, "mcp.json"),
+               *(("--permission-mode", permission_mode) if permission_mode else ()), *extra_args]
         env = clean_env()
         env.update(FARERO_HOME=h.e, FARERO_SOCKET=h.env["FARERO_SOCKET"])
         self.proc = subprocess.Popen(
@@ -568,16 +574,32 @@ class Harness:
 
     # -- lifecycle
 
-    def start_daemon(self):
-        log = open(os.path.join(self.e, "farerod.log"), "w")
+    def start_daemon(self, append=False):
+        """Starts farerod. append=True keeps the log of an earlier farerod
+        (a restart); the wait is then for a new "gateway listening" line."""
+        path = os.path.join(self.e, "farerod.log")
+        start = os.path.getsize(path) if append and os.path.exists(path) else 0
+        log = open(path, "a" if append else "w")
         self.daemon = subprocess.Popen([os.path.join(BIN, "farerod"), "--dev", "--debug"],
                                        env=dict(self.env, **self.daemon_env), stdout=log, stderr=subprocess.STDOUT)
 
         def listening():
-            with open(os.path.join(self.e, "farerod.log")) as f:
-                return "gateway listening" in f.read()
+            with open(path, "rb") as f:
+                f.seek(start)
+                return b"gateway listening" in f.read()
         if not self.wait(listening, 15):
             raise Abort("farerod did not start its gateway (see farerod.log)")
+
+    def stop_daemon(self):
+        """Stops farerod (SIGTERM, like launchctl kickstart -k)."""
+        if self.daemon and self.daemon.poll() is None:
+            self.daemon.terminate()
+            try:
+                self.daemon.wait(10)
+            except subprocess.TimeoutExpired:
+                self.daemon.kill()
+                self.daemon.wait(5)
+        self.daemon = None
 
     def start_watch(self):
         """Connects the app stand-in (again: the log is appended to)."""
@@ -606,14 +628,17 @@ class Harness:
         try:
             db = sqlite3.connect(f"file:{os.path.join(self.e, 'farero.db')}?mode=ro", uri=True, timeout=5)
             try:
-                rows = db.execute("SELECT id, ts, kind, tool, input_json, decision, reason FROM calls "
+                rows = db.execute("SELECT id, ts, kind, tool, input_json, decision, reason, plugin, "
+                                  "COALESCE(session_id, ''), conn_id, error, result_text, duration_ms FROM calls "
                                   "WHERE ts >= ? ORDER BY id", (int(since * 1000),)).fetchall()
             finally:
                 db.close()
         except sqlite3.Error:
             return []
-        return [{"id": i, "t": ts / 1000.0, "kind": k, "tool": tool, "input": inp, "decision": d, "reason": r}
-                for i, ts, k, tool, inp, d, r in rows]
+        return [{"id": i, "t": ts / 1000.0, "kind": k, "tool": tool, "input": inp, "decision": d, "reason": r,
+                 "plugin": pl, "session_id": sid, "conn_id": conn, "error": err, "result_text": res,
+                 "duration_ms": dur}
+                for i, ts, k, tool, inp, d, r, pl, sid, conn, err, res, dur in rows]
 
     def cleanup(self):
         for a in self.agents:
@@ -648,6 +673,20 @@ def dialog_open(a):
 def selected_option(a):
     m = re.search(r"❯\s*(\d)\.\s*(\S+)", a.text().split("Do you want to proceed?")[-1])
     return m and (m[1], m[2])
+
+
+def select_option(h, a, prefix, tries=6):
+    """Moves the terminal prompt's selection down until an option that
+    starts with prefix is selected, and returns the selection. Claude Code
+    2.1.293 added "Yes, and switch to auto mode", which moved "No" from the
+    third option to the fourth."""
+    for _ in range(tries):
+        sel = selected_option(a)
+        if sel and sel[1].startswith(prefix):
+            return sel
+        a.send(DOWN)
+        h.sleep(0.4)
+    return selected_option(a)
 
 
 def step_register(h):

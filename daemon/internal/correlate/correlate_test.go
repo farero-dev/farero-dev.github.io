@@ -56,8 +56,7 @@ func TestAmbiguousResolvedByPID(t *testing.T) {
 	if sid, _ := c.Match("unknown-conn", "github_list_issues", in); sid != "" {
 		t.Fatalf("ambiguous match without PID must be unknown, got %q", sid)
 	}
-	c.SetConnPID("connB", 200)
-	sid, m := c.Match("connB", "github_list_issues", in)
+	sid, m := c.Match(NewConnID(200, "b"), "github_list_issues", in)
 	if sid != "claude:b" || m != ByPID {
 		t.Fatalf("got %q %q", sid, m)
 	}
@@ -81,8 +80,38 @@ func TestSameSessionTwiceIsNotAmbiguous(t *testing.T) {
 
 func TestNoHookIsUnknown(t *testing.T) {
 	c, _ := newTest()
-	c.SetConnPID("conn", 100)
-	if sid, _ := c.Match("conn", "t", json.RawMessage(`{}`)); sid != "" {
+	if sid, _ := c.Match(NewConnID(100, "x"), "t", json.RawMessage(`{}`)); sid != "" {
 		t.Fatalf("a call without a PreToolUse must be unknown, got %q", sid)
+	}
+}
+
+// The connection id carries the agent PID, so the tie-break needs no
+// memory: Claude Code keeps its id across a farerod restart without running
+// the headersHelper again (M4).
+func TestConnIDCarriesPID(t *testing.T) {
+	for conn, want := range map[string]int{
+		NewConnID(4242, "abc"): 4242,
+		NewConnID(0, "abc"):    0, // unknown agent process
+		NewConnID(1, "abc"):    0, // launchd, not an agent
+		"abc":                  0,
+		"x.abc":                0,
+		"":                     0,
+	} {
+		if got := connPID(conn); got != want {
+			t.Errorf("connPID(%q) = %d, want %d", conn, got, want)
+		}
+	}
+	c, _ := newTest()
+	in := json.RawMessage(`{}`)
+	c.Expect("claude:a", 100, "dev_echo", in)
+	c.Expect("claude:b", 200, "dev_echo", in)
+	if sid, m := New().Match(NewConnID(100, "x"), "dev_echo", in); sid != "" || m != None {
+		t.Fatalf("no pending entry: %q %q", sid, m)
+	}
+	if sid, m := c.Match(NewConnID(0, "x"), "dev_echo", in); sid != "" {
+		t.Fatalf("ambiguous match without a PID must be unknown, got %q %q", sid, m)
+	}
+	if sid, m := c.Match(NewConnID(100, "x"), "dev_echo", in); sid != "claude:a" || m != ByPID {
+		t.Fatalf("got %q %q", sid, m)
 	}
 }

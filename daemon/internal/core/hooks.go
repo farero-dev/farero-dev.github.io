@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/farero-dev/farero/daemon/internal/broker"
+	"github.com/farero-dev/farero/daemon/internal/correlate"
 	"github.com/farero-dev/farero/daemon/internal/gateway"
 	"github.com/farero-dev/farero/daemon/internal/ipc"
 	"github.com/farero-dev/farero/daemon/internal/model"
@@ -132,7 +133,7 @@ func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.
 		return finish(d.Decision, joinReasons(d.Reasons), ipc.HookDecision{Behavior: ipc.BehaviorNone})
 	}
 
-	res := c.broker.Request(ctx, model.Approval{
+	res := c.ask(ctx, model.Approval{
 		Kind: model.KindAgent, SessionID: s.ID, SessionLabel: sessionLabel(s), Agent: s.Agent,
 		Tool: in.ToolName, Input: input, Reasons: d.Reasons, AllowSession: d.AllowSession,
 	})
@@ -185,8 +186,7 @@ func (c *Core) serveHeaders(_ context.Context, conn *ipc.Conn, m ipc.Message) {
 		conn.SendError(m.ID, err)
 		return
 	}
-	connID := secret.RandomToken()[:16]
-	c.corr.SetConnPID(connID, req.PID)
+	connID := correlate.NewConnID(req.PID, secret.RandomToken()[:16])
 	conn.Send(ipc.TypeHeadersResult, m.ID, ipc.HeadersResult{Headers: map[string]string{
 		"Authorization":    "Bearer " + sec,
 		gateway.ConnHeader: connID,

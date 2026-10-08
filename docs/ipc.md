@@ -37,13 +37,13 @@
 ```
 표시 이름은 `cwd`의 폴더 이름, 에이전트 종류, 시작 시각을 묶어 만든다(기능 명세서 5-1).
 
-`status`가 바뀌는 때(아키텍처 6장, Claude Code 2.1.290으로 확인):
+`status`가 바뀌는 때(아키텍처 6장, Claude Code 2.1.290·2.1.293으로 확인):
 
 | 상태 | 들어가는 때 |
 |---|---|
-| `running` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse(Failure)`, 승인에 답한 뒤 |
+| `running` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse(Failure)`, 에이전트 도구 승인에 답한 뒤 |
 | `waiting_input` | `SessionStart`(compact 제외), `Stop`, `StopFailure`, `Notification`(`idle_prompt`, MCP elicitation), `AskUserQuestion`, 사용자가 턴을 멈춤(Esc·Ctrl-C·터미널 프롬프트에서 거부. 훅 이벤트가 없어서 transcript의 중단 표시와 대기 중이던 훅의 종료로 알아낸다) |
-| `waiting_approval` | `PermissionRequest`, `Notification`(`permission_prompt`), 게이트웨이 승인 요청 |
+| `waiting_approval` | `PermissionRequest`, `Notification`(`permission_prompt`). 그리고 그 세션의 승인 카드(게이트웨이·에이전트 도구)가 열려 있는 동안은 훅 이벤트와 관계없이 이 상태다. Claude Code는 120초 넘게 걸리는 MCP 호출을 백그라운드로 옮기며 카드가 열린 채 `PostToolUse`·`Stop`을 보내고, 카드가 열린 채 사용자가 입력할 수도 있다(M4, 2.1.293). 카드가 닫히면 훅 이벤트가 정한 상태로 돌아간다 |
 | `ended` | `SessionEnd`. 종료된 세션은 `SessionStart`나 다른 에이전트 프로세스의 이벤트로만 다시 열린다 |
 | `unknown` | 에이전트 프로세스가 5초 넘게 없음(`SessionEnd` 없이 끝난 경우), PID를 모르면 10분 동안 이벤트 없음 |
 
@@ -116,7 +116,9 @@
 | 방향 | type | data |
 |---|---|---|
 | → | `headers.issue` | `{"agent":"claude","pid":25145}` |
-| ← | `headers.result` | `{"headers":{"Authorization":"Bearer …","X-Farero-Conn":"…"}}` |
+| ← | `headers.result` | `{"headers":{"Authorization":"Bearer …","X-Farero-Conn":"25145.…"}}` |
+
+`pid`는 `farero-hook`의 부모 프로세스(claude)다. `X-Farero-Conn`은 `<pid>.<난수>`라서, 같은 인자의 호출이 여러 세션에 걸려 모호할 때 farerod가 재시작된 뒤에도 그 PID로 세션을 고를 수 있다. Claude Code는 이 헬퍼를 프로세스마다 한 번만 실행하고, farerod가 재시작돼도 다시 실행하지 않는다(M4).
 
 ## 앱 (UI 클라이언트)
 

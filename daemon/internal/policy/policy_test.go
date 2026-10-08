@@ -3,6 +3,7 @@ package policy
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"slices"
 	"testing"
 
@@ -63,6 +64,23 @@ func TestEmbeddedTableMatchesRepoCopy(t *testing.T) {
 	}
 	if e.Exposed("resend", "create-api-key") {
 		t.Error("unlisted Resend tools must not be exposed")
+	}
+}
+
+// Claude Code names gateway tools mcp__farero__<plugin>_<tool>, and the
+// Claude API accepts tool names of at most 64 characters from this set.
+var claudeToolName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+func TestExposedNamesFitClaude(t *testing.T) {
+	for p, pt := range DefaultTable().Plugins {
+		for name, r := range pt.Tools {
+			if r.Level == LevelBlock {
+				continue
+			}
+			if full := "mcp__farero__" + ToolKey(p, name); !claudeToolName.MatchString(full) {
+				t.Errorf("%s is not a valid Claude tool name", full)
+			}
+		}
 	}
 }
 

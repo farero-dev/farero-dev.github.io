@@ -249,3 +249,61 @@ M2 하네스(pty·화면·격리 설정)를 `scripts/e2elib.py`로 분리해 `e2
 
 - 스크립트에서 고친 것: 터미널 프롬프트가 열린 직전에는 첫 선택지 줄에 진행 표시가 겹쳐 있어("1. …(running PreToolUse hook)") "Yes" 선택을 기다렸다가 읽는다. 알 수 없는 모델이면 하단에 "? for shortcuts" 대신 권한 모드("auto mode on")가 보여서 입력 대기 판정에 넣었다.
 - 확인 못 한 것: 노치 카드의 단축키(⌃⌥Y/S/N)와 클릭을 실제 앱 번들에서 누르는 것, 포커스를 빼앗지 않는지 눈으로 보는 것(M0 2차에서 카드로 두 건 처리한 기록은 있음). 서브에이전트의 승인 대기 e2e.
+
+## 2026-10-08
+
+### M4 게이트웨이
+M4 코드(MCP 게이트웨이, 세션 연결, 정책 엔진, 감사 로그, 개발용 가짜 플러그인, `farero-hook --headers`, F-06 게이트웨이 등록)는 대부분 이미 있었다. 브랜치는 develop(M3) 위에서 시작했다(`seongj-un/m4`가 main 기준이라 develop으로 옮김). 실제 대화형 Claude Code로 완료 기준을 확인하면서 드러난 문제를 고쳤다.
+
+**확인한 사실 (Claude Code 2.1.293, macOS 26.6.2)**
+- **프로토콜:** 게이트웨이가 2026-07-28을 받게 되자(아래 "고친 것"), Claude Code는 시작 0.8~1.2초 뒤 `server/discover`(2026-07-28, client `claude-code 2.1.293`)를 보낸다. 이어서 같은 연결로 `subscriptions/listen`과 `tools/list`를 부르고, `initialize`는 보내지 않는다. 그 전(M0)에는 SDK가 2026-07-28을 거절해서 `initialize`(2025-11-25)로 접속했다.
+- **도구 목록 변경:** 정책으로 도구를 차단하면, 열려 있던 세션 두 개가 0.02~0.04초 뒤 `tools/list`를 다시 읽는다. 다음 프롬프트에서 transcript에 `deferred_tools_delta`(removedNames)가 붙고, 모델은 그 도구를 부르지 않는다(PreToolUse·호출·로그 없음). 되돌리면 0.03초 안에 다시 읽고, 그 도구가 다시 동작한다.
+- MCP 도구는 deferred라서, 모델이 도구를 처음 쓰기 전마다 `ToolSearch select:<도구>`를 먼저 부른다.
+- **120초 백그라운드 이동:** MCP 호출이 120초 넘게 끝나지 않으면 Claude Code가 그 호출을 백그라운드로 옮긴다. 모델은 바로 "still running after 120s. It was moved to the background as task …"(오류 아님)를 받는다. 그 도구의 `PostToolUse`가 120.1초에, `Stop`이 약 122초에 와서 턴이 끝나지만, 카드는 그대로 열려 있다.
+  - 나중에 허용하면 0.2초 뒤 `<task-notification> completed … wrote: …`가 새 턴으로 들어간다.
+  - 시간 초과면 `failed … 승인 대기 시간 초과 (farero)`가 새 턴으로 들어간다.
+  - Claude Code 번들의 `getMcpAutoBackgroundMs`(기본 120000ms, 플래그 `tengu_mcp_auto_background`, 환경 변수 `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`)가 이 동작을 정한다. `-p`와 IDE 서버에서는 꺼져 있고, MCP elicitation이 열려 있는 동안에도 일어나지 않는다.
+  - 환경 변수를 0으로 두면 옮기지 않는다. 그러면 150초 허용 결과가 바로 돌아오고, 180초 시간 초과는 도구 오류와 `PostToolUseFailure`로 끝난다.
+- **결정 (사용자, Q83):** 백그라운드 이동은 Claude Code 기본값대로 둔다. F-06은 환경 변수를 넣지 않는다. 승인 규칙(승인 전에는 실행하지 않음, 10분 마감)은 그대로 지켜지고, 결과만 새 턴으로 전달된다.
+- **실제 10분:** Claude Code는 HTTP 요청을 600초 동안 열어 두었다. 카드는 600.0초에 `timeout`으로 거둬졌다(행 1개, `tools/call` 1번, duration_ms 600005~600015). 서버별 `timeout: 660000` 덕분에 5분 idle 타임아웃이 먼저 끊지 않는다. M0에서는 75초까지만 확인했었다.
+- **승인 대기 중 Esc:** 카드가 0.05~0.06초 뒤 거둬지고, 행은 `cancelled`다. 훅 이벤트는 없다(PostToolUse(Failure)도 Stop도 없음). transcript에는 "The user doesn't want to proceed…"와 중단 표시가 남는다. 상태는 1.1~3초 뒤 입력 대기가 된다(transcript 확인).
+- **카드가 열린 채 입력:** 입력하고 0.6초 뒤 `UserPromptSubmit`이 온다. 이때 호출은 백그라운드로 옮겨지지 않고, 허용하면 결과가 그대로 돌아온다.
+- **PreToolUse → 게이트웨이 호출:** 3~14ms(중앙값 5~6ms)로, M0의 60~90ms보다 짧다. `headersHelper`는 claude 프로세스마다 한 번 실행되고, 연결 ID 하나가 세션 내내(요청 22~23개) 쓰이며 세션과 1:1로 대응한다.
+- **farerod 재시작**(같은 포트·비밀값, 앱 업데이트 때의 `kickstart -k`와 같음): Claude Code는 2.0초 뒤 같은 연결 ID로 `subscriptions/listen`을 다시 열고 `tools/list`를 다시 읽는다. `server/discover`도 `headersHelper`도 다시 실행하지 않는다(2026-07-28은 세션이 없어 잃을 것이 없음). 다음 호출은 새 farerod에서 같은 세션에 연결됐다.
+- **auto mode:** 격리한 설정(사용자 설정 없음)에서 Claude Code 2.1.293이 auto mode로 시작했다. 분류기가 허용한 Bash(`npm install`, `echo q >> grant.log`)는 `PermissionRequest` 없이 실행돼 farero 카드가 뜨지 않는다. F-04 카드는 Claude Code가 실제로 물을 때만 뜬다.
+  - 권한 프롬프트에 "Yes, and switch to auto mode"가 더해져 "No"가 네 번째 선택지가 됐다.
+  - e2e 스크립트는 `--permission-mode default`로 실행하고, 선택지는 글자로 찾는다(`e2elib.select_option`).
+- 이전 프로토콜 클라이언트(`initialize` 2025-11-25)도 그대로 동작한다. Mcp-Session-Id와 SSE 응답을 받는다.
+
+**고친 것**
+- **게이트웨이가 2026-07-28도 받는다** (기능 명세서 5-6): Go MCP SDK v1.8.0은 2026-07-28을 stateless 핸들러에서만 받고, stateless 핸들러는 `initialize` 클라이언트에게 세션을 주지 않는다(그러면 `tools/list_changed`를 못 받는다).
+  - 그래서 요청을 나눈다. `Mcp-Session-Id`가 없고 `Mcp-Protocol-Version`이 2026-07-28 이상이면 stateless 핸들러로, 나머지(`initialize`, 세션 헤더가 있는 요청, GET 알림 스트림)는 stateful 핸들러로 보낸다. 두 핸들러는 같은 서버를 쓴다.
+  - stateless 쪽은 `PropagateRequestCancellation`을 켰다. 에이전트가 요청을 버리면(Esc) 호출도 끝나 카드가 거둬진다.
+  - 요청 크기 한도는 4MiB에서 64MiB로 늘렸다(Resend 첨부 메일).
+- **카드가 열린 동안 세션은 승인 대기:** 위의 백그라운드 이동(PostToolUse·Stop)과 카드가 열린 채의 입력(UserPromptSubmit)이 `waiting_approval`을 덮어썼다. 또 게이트웨이가 카드가 끝나면 무조건 `running`으로 바꿔서, 시간 초과·취소 뒤 쉬고 있는 세션이 실행 중으로 보였다.
+  - 이제 세션별로 열린 카드 수를 세고(`session.ApprovalOpened/Closed`, 메모리만), 카드가 있으면 `waiting_approval`, 없으면 훅 이벤트가 정한 상태를 보여 준다. 에이전트 도구 카드도 같다.
+  - DB에는 훅 이벤트가 정한 상태를 저장한다. 카드는 farerod가 재시작되면 사라지므로, 다시 읽었을 때 없는 카드를 기다리는 것처럼 보이면 안 된다. 세션을 삭제해도 열린 카드 수는 남긴다(같은 세션이 다시 생겨도 맞게 보이도록).
+- **세션 연결:** farerod를 재시작하면 연결 ID → 에이전트 PID 대응(동시 같은 인자 호출의 구분용)이 사라졌다. 메모리에만 있었고, Claude Code가 `headersHelper`를 다시 실행하지 않기 때문이다. 이제 연결 ID 자체에 PID를 넣는다(`<pid>.<난수>`, `correlate.NewConnID`). 처음에는 모호하지 않은 매칭에서 PID를 배우게 했지만, 리뷰에서 문제가 나와 바꿨다. 자기 PreToolUse가 오지 않은 호출이 다른 세션의 같은 키에 묶이면, 그 PID를 잘못 배운 채 남는다. 그러면 이후 모호한 호출이 다른 세션의 세션 허용을 받을 수 있다.
+- 개발용: `farero-devctl policy set <plugin> <tool> [level]`. 게이트웨이가 MCP 요청을 로그에 남긴다(연결 설정은 INFO, 나머지는 `--debug`).
+- 테스트: 두 프로토콜 각각의 목록·호출·연결 헤더·`list_changed`·취소, 카드가 열린 동안의 상태(백그라운드 이동, 새 입력, 시간 초과, DB 저장, 삭제), 연결 ID의 PID, 분류표 도구 이름이 Claude 도구 이름 규칙(64자)에 맞는지.
+- 리뷰(서브 에이전트) 반영: 위의 PID 학습 문제, 세션 삭제 때 카드 수가 사라지던 것, 카드 상태가 DB에 저장되던 것, e2e에서 빈 목록이면 통과하는 검사와 카드가 열린 동안 훅 이벤트가 실제로 왔는지 보지 않던 검사.
+
+**실제 검증 (`scripts/e2e-gateway.py`)**
+개발 데몬(가짜 플러그인 `dev`)을 격리된 Claude 설정에 실제로 등록하고, 대화형 claude 두 개를 pty로 띄워 돌린다. `alpha`는 정상 세션이고, `beta`는 PreToolUse 훅을 뺀 세션이라 세션 불명이 된다. 앱 대신 `farero-devctl`로 카드에 답한다. 마지막 실행 기준으로 빠른 실행은 136개, 3분 마감 실행(백그라운드 이동 포함)은 33개 검사가 모두 통과했다. 실제 10분 실행은 상태 수정 전의 스크립트로 23개 검사가 통과했다. 바뀐 하네스로 `e2e-sessions.py`(64개)와 `e2e-approvals.py`(67개)도 다시 통과했다.
+
+| 확인 | 결과 |
+|---|---|
+| HTTP | 127.0.0.1의 저장된 포트에만 열림, `Origin` 헤더 403, bearer 없음·틀림 401 |
+| 도구 목록 | `dev_echo/write_sim/destroy_sim/taint_sim/fail_sim`만 보임(`blocked_sim`·`unclassified_sim` 없음). annotation은 분류표 기준(readOnly는 echo·taint_sim, destructive는 destroy_sim만) |
+| 자동 허용 | 카드 없이 `auto_allowed`, alpha 세션·연결 ID에 연결 |
+| 승인 + 세션 허용 | 카드(플러그인·도구·입력 전체·이유 `policy`·세션 허용 버튼·폴더 이름) → `allow_session` → 다음 호출 `session_allowed` |
+| 세션 허용 불가 | 버튼 없음, `allow_session` 답은 거절됨, 매번 다시 물음 |
+| 거부·업스트림 실패 | 모델이 `is_error`와 이유를 받음, 실패는 `error`가 기록되고 호출 1번(재시도 없음) |
+| 오염 (시나리오 C) | `taint_sim` 뒤 `tainted: true`. `write_sim`은 이유 `policy,tainted`로 버튼 없이 다시 묻고, 세션 허용해 둔 Bash도 다시 물음(Q39) |
+| 앱 꺼짐 (시나리오 D) | `dev_echo`는 동작, `write_sim`은 `auto_denied`/`app_not_running`, 모델이 "실행 중이 아니라"를 받음 |
+| 세션 불명 | beta의 카드에 `unknown_session`, 버튼 없음, "세션 불명", 행의 session_id 없음 |
+| 승인 마감 | 30초·3분·10분 모두 `timeout`, 카드 철회, 모델이 "승인 대기 시간 초과"를 받음(도구 오류 또는 task-notification) |
+| 세션 상태 | 카드가 열린 동안 `waiting_approval`(입력·백그라운드 이동·Stop에도 유지), 닫히면 훅 이벤트대로(허용 → running, 턴이 끝났으면 waiting_input), Esc → 1.1초 뒤 waiting_input |
+| 재시작·목록 변경 | 위 사실대로 |
+
+- 확인 못 한 것: 재시작을 넘어 두 세션이 같은 인자를 동시에 보낼 때의 PID 구분을 실제 Claude Code로 확인하는 것(단위 테스트만). 승인 카드를 실제 앱 번들에서 누르는 것(M6).
