@@ -56,3 +56,14 @@ func TestRailwaySavedSetupNeedsAuthURL(t *testing.T) {
 		t.Fatal("garbage accepted")
 	}
 }
+
+// Railway's whoami is Markdown; the account label is plain text, cut on a
+// rune boundary.
+func TestFirstLineLabel(t *testing.T) {
+	if got := firstLine("**박성준** (@seongj-un)\nWorkspaces: …", 60); got != "박성준 (@seongj-un)" {
+		t.Errorf("label = %q", got)
+	}
+	if got := firstLine("가나다라", 2); got != "가나" {
+		t.Errorf("cut = %q", got)
+	}
+}
