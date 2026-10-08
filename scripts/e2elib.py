@@ -1,5 +1,6 @@
 """Shared harness for the end-to-end checks with a real, interactive Claude Code
-(scripts/e2e-sessions.py for M2, scripts/e2e-approvals.py for M3).
+(scripts/e2e-sessions.py for M2, scripts/e2e-approvals.py for M3,
+scripts/e2e-gateway.py for M4, scripts/e2e-plugins.py for M5).
 
 Each `claude` runs in a pseudo-terminal owned by the script: headless, no
 Terminal window, no focus stealing. The script types into it like a user and
@@ -16,6 +17,7 @@ CLAUDE*/MCP* variables are removed from claude's environment.
 """
 import codecs
 import fcntl
+import glob
 import json
 import os
 import re
@@ -28,6 +30,9 @@ import subprocess
 import termios
 import time
 import unicodedata
+import urllib.error
+import urllib.request
+from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.environ.get("E2E_BIN") or os.path.join(ROOT, "build", "dev")
@@ -653,6 +658,133 @@ class Harness:
                     p.wait(5)
                 except subprocess.TimeoutExpired:
                     p.kill()
+
+
+# ---------------------------------------------------------------------------
+# Claude Code's transcript, farerod's log, the gateway over HTTP
+
+
+def transcript_path(a):
+    sid = a.sid.split(":", 1)[-1]
+    paths = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
+    return paths[0] if paths else None
+
+
+def transcript(a):
+    """[(tool_use, tool_result or None)] and the assistant's texts, from
+    Claude Code's own record of the session."""
+    path = transcript_path(a)
+    uses, results, texts = [], {}, []
+    if not path:
+        return [], texts
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            msg = ev.get("message") if isinstance(ev, dict) else None
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for c in content:
+                if not isinstance(c, dict):
+                    continue
+                if c.get("type") == "tool_use":
+                    uses.append(c)
+                elif c.get("type") == "tool_result":
+                    results[c.get("tool_use_id")] = c
+                elif c.get("type") == "text" and msg.get("role") == "assistant":
+                    texts.append(c.get("text", ""))
+    return [(u, results.get(u.get("id"))) for u in uses], texts
+
+
+def result_text(res):
+    if not res:
+        return ""
+    c = res.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
+    return ""
+
+
+LOGKV = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S*)')
+
+
+def farerod_log(h, since=0.0, msg=None):
+    """Parsed farerod.log lines (slog text): dicts with t and the keys."""
+    out = []
+    try:
+        with open(os.path.join(h.e, "farerod.log"), encoding="utf-8", errors="replace") as f:
+            raw = f.read().splitlines()
+    except OSError:
+        return out
+    for line in raw:
+        kv = {}
+        for k, v in LOGKV.findall(line):
+            if v.startswith('"'):
+                try:
+                    v = json.loads(v)
+                except ValueError:
+                    v = v[1:-1]
+            kv[k] = v
+        try:
+            kv["t"] = datetime.fromisoformat(kv.get("time", "")).timestamp()
+        except ValueError:
+            continue
+        if kv["t"] < since or (msg and kv.get("msg") != msg):
+            continue
+        kv["line"] = line
+        out.append(kv)
+    return out
+
+
+def mcp_requests(h, since=0.0, method=None):
+    return [r for r in farerod_log(h, since, "mcp request") if method is None or r.get("method") == method]
+
+
+def http(url, body=None, headers=None, method="POST", timeout=15):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.headers, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read().decode("utf-8", "replace")
+
+
+def rpc_result(headers, body, want_id):
+    """The JSON-RPC response with want_id from a JSON or SSE body."""
+    msgs = []
+    if "text/event-stream" in (headers.get("Content-Type") or ""):
+        for line in body.splitlines():
+            if line.startswith("data:"):
+                try:
+                    msgs.append(json.loads(line[5:].strip()))
+                except ValueError:
+                    pass
+    else:
+        try:
+            v = json.loads(body)
+            msgs = v if isinstance(v, list) else [v]
+        except ValueError:
+            pass
+    for m in msgs:
+        if isinstance(m, dict) and m.get("id") == want_id:
+            return m
+    return None
+
+
+def gateway_headers(h, helper):
+    """Runs the MCP entry's headersHelper like Claude Code does."""
+    env = dict(os.environ, FARERO_HOME=h.e, FARERO_SOCKET=h.env["FARERO_SOCKET"])
+    p = subprocess.run(helper, shell=True, env=env, capture_output=True, text=True, timeout=10)
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        return {}
 
 
 # ---------------------------------------------------------------------------

@@ -307,3 +307,58 @@ M4 코드(MCP 게이트웨이, 세션 연결, 정책 엔진, 감사 로그, 개�
 | 재시작·목록 변경 | 위 사실대로 |
 
 - 확인 못 한 것: 재시작을 넘어 두 세션이 같은 인자를 동시에 보낼 때의 PID 구분을 실제 Claude Code로 확인하는 것(단위 테스트만). 승인 카드를 실제 앱 번들에서 누르는 것(M6).
+
+### M5 플러그인
+M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)는 대부분 이미 있었다. 브랜치는 develop(M4 병합) 위에서 시작했다. 실제 계정으로 `tools/list`를 받아 분류표를 확정하고, 실제 대화형 Claude Code로 시나리오 B·C·D를 확인했다. 사용자 결정(2026-10-08):
+- GitHub 쓰기 확인은 새 비공개 저장소 `farero-dev/farero-e2e`에서 한다(만든 이슈는 끝에 `gh`로 닫음).
+- Railway는 계정 체험 기간이 끝나 프로젝트를 만들 수 없다. 시나리오 B는 카드 → 허용 → 업스트림 호출 → 로그까지만 확인한다(실제 재배포는 나중에).
+- Gmail은 GCP OAuth 클라이언트가 생기면 따로 한다. 그동안 시나리오 C의 오염 소스는 GitHub `issue_read`로 확인한다.
+- Resend는 보류한다(이 네트워크에서 `resend.com` 로그인 페이지가 여전히 열리지 않음). 분류표는 resend-mcp 소스(`0047400`, 2026-10-07)로 맞췄다.
+
+**확인한 사실 (Claude Code 2.1.293, macOS 26.6.2)**
+- **GitHub** (기본 toolset, device flow 토큰): 도구 44개. 분류표와 같고, 새 도구는 `ui_get` 하나다. MCP Apps 화면 전용(`_meta.ui.visibility: ["app"]`)이라 에이전트에 노출하지 않는다(차단). 분류표의 `delete_repository`, `assign_copilot_to_issue`, `request_copilot_review`는 기본 toolset에 없다(차단 항목이라 그대로 둔다).
+- **GitHub 읽기 전용 스위치가 동작하지 않았다:** 코드가 `X-MCP-Read-Only` 헤더를 보냈는데, 원격 서버의 헤더 이름은 `X-MCP-Readonly`다(docs/remote-server.md). 모르는 헤더는 조용히 무시해서 쓰기 도구 17개가 그대로 보였다. 고친 뒤 켜면 27개(쓰기 0개, 노출 26개)로 줄고, 끄면 44개로 돌아온다.
+- **Railway** (DCR + loopback 토큰): 도구가 68개로 늘었다(분류표 11개). 분류하지 않은 57개는 숨겨져 있었다. 도구 설명에 따르면 OAuth 앱에는 `list-variables`가 변수 이름만, `get-bucket-credentials`가 키 없이 접속 정보만 준다. 업스트림 annotation은 `redeploy`를 destructive로 표시하지만 노출 annotation은 분류표를 따른다(Q36).
+- **Resend** (소스 기준): 분류표의 메일 도구 15개는 이름 그대로 있다. 메일 관련 새 도구는 `share-email`(보낸·받은 메일의 공개 공유 링크, 48시간) 하나다.
+- **토큰 갱신:** 저장된 토큰의 만료 시각을 과거로 바꾸고 farerod를 띄우자, GitHub(만료형 사용자 토큰, 8시간)와 Railway(1시간) 모두 실제 서버에서 갱신됐다. 둘 다 refresh token도 새 값으로 바뀌어 저장됐고, 연결 상태와 도구 목록 조회가 그대로 유지됐다. M0에서 남긴 "GitHub 만료형 토큰 자동 갱신(8시간 뒤)" 확인을 대신한다.
+- **Railway 업스트림 오류:** 없는 ID로 `redeploy`를 부르면 Railway가 200ms 안에 "You don't have the required role (member) on this resource."를 돌려준다. 행은 `user_allowed`에 오류 "upstream returned an error"이고, `tools/call`은 1번이다(재시도 없음).
+- Railway `whoami`의 첫 줄은 Markdown(`**이름** (@login)`)이라 계정 표시에 별표가 그대로 남았다.
+
+**분류표 확정 (사용자 결정, 2026-10-08)**
+- Railway 새 도구 57개 (리뷰 뒤 일부를 올림, 아래 "리뷰 반영"):
+  - 자동 허용(23): 조회·상태·지표·문서·템플릿 검색.
+  - 자동 허용 + 오염(5): `get-logs`, `list-traces`, `get-trace`, `get-deployment-diagnosis`, `describe-template`. 외부 요청 내용, 커밋·PR 글, 커뮤니티 README가 섞인다.
+  - 승인(14): 만들기·바꾸기·`restart-service`, `get-bucket-credentials`.
+  - 승인, 세션 허용 불가(15): 삭제 6종, `reset-bucket-credentials`, `set-variables`(덮어쓴 값은 되돌릴 수 없음), `update-function-source-code`(코드 전체 덮어쓰기), `update-service`·`connect-service-source`(시작 명령·소스를 바꾸면 서비스의 비밀 변수로 임의 코드가 돈다), `create-webhook`·`update-webhook`·`test-webhook`(임의 URL로 POST), `create-tcp-proxy`(DB 등을 인터넷에 노출).
+  - Railway 전체: 자동 허용 28, 자동 허용 + 오염 5, 승인 17, 세션 허용 불가 17, 차단 1.
+- GitHub `ui_get`과 Resend `share-email`은 차단으로 적었다. 분류표에 없어도 숨겨지지만, 결정을 남기기 위해서다.
+
+**고친 것**
+- GitHub 읽기 전용 헤더를 `X-MCP-Readonly`로 고쳤다.
+- 계정 표시: Markdown 강조를 지우고, 바이트가 아니라 글자 단위로 자른다(한글이 중간에 잘리지 않게).
+- 개발용 `farero-devctl plugin [connect <p> [k=v…] | disconnect <p> | option <p> <k> <v> | tools <p>]`를 추가했다. connect는 앱의 플러그인 창처럼 device code·URL을 보여 주고 브라우저를 연 뒤, 연결되거나 실패할 때까지 기다린다.
+- IPC `plugin.tools`를 추가했다. 연결된 플러그인의 실제 `tools/list`(설명·업스트림 annotation 포함)를 분류표와 나란히 보여 주고, 분류표에는 있지만 업스트림에 없는 도구도 알려 준다. farerod는 분류표에 없는 업스트림 도구를 목록이 바뀔 때마다 INFO로 남긴다(업스트림 변화 감지용, 도구는 계속 숨김).
+- 테스트: `plugin.tools`(미분류·차단·없어진 도구), 계정 표시.
+- 리뷰(서브 에이전트) 반영:
+  - 분류 (사용자 결정, 2026-10-08): 플러그인 세션 허용은 입력과 상관없이 도구 단위라, 한 번 허용하면 그 세션에서는 모든 프로젝트·서비스에 다시 묻지 않는다. 그래서 `update-service`, `connect-service-source`, `create-webhook`, `update-webhook`을 세션 허용 불가로 올렸다. `get-bucket-credentials`는 "OAuth 앱에는 키 없음"이 도구 설명일 뿐 실제로 확인하지 못해 승인으로 올렸다.
+  - 업스트림 목록 조회가 호출자의 시간 초과로 끝나도 공용 MCP 세션을 닫지 않는다. 닫으면 같은 세션으로 진행 중이던 에이전트 호출이 실패하는데, 이 호출은 재시도하지 않으므로 업스트림에서는 실행됐을 수 있다.
+  - e2e:
+    - 이 디렉터리의 소켓을 연 farerod만 멈춘다. 다른 worktree·e2e·설치된 앱의 farerod는 건드리지 않는다.
+    - `gh` 로그인을 먼저 확인한다(빈 로그인이면 결과 검사가 항상 참이 됐다).
+    - 목록에 없는 도구를 통과시키던 annotation 검사를 고쳤다.
+    - 앱이 꺼진 동안의 턴 종료는 DB의 `Stop`으로 기다린다(전에는 매번 120초를 다 기다렸다).
+
+**실제 검증 (`scripts/e2e-plugins.py`)**
+개발 데몬을 `/tmp/frm5`에서 띄운다. 실행마다 `dev-secrets.json`과 `farero.db`만 남기고 지워서, 실행 때마다 다시 로그인하지 않게 했다. 연결되지 않은 플러그인은 처음에 대화형으로 연결한다. farero를 격리된 Claude 설정에 등록하고, 대화형 claude 하나(`alpha`)로 실제 GitHub·Railway 도구를 게이트웨이를 거쳐 부른다. 공용 헬퍼(transcript, 게이트웨이 원시 클라이언트, farerod 로그 읽기)는 `e2elib.py`로 옮겼다. 검사 72개가 모두 통과했다.
+
+| 확인 | 결과 |
+|---|---|
+| 분류표 | GitHub 44개 중 미분류 0(노출 43, 차단 `ui_get`), Railway 68개 중 미분류 0·빠진 항목 0(노출 67, 차단 `railway-agent`) |
+| 도구 목록 | 원시 MCP 클라이언트로 github 43 + railway 67. annotation은 분류표 기준 |
+| 자동 허용 | `github_get_me`(412ms, `gh` 로그인과 같은 계정), `railway_whoami`(158ms). 카드 없음, alpha 세션·PID가 든 연결 ID |
+| 시나리오 B | `railway_redeploy` 카드(플러그인·도구·입력 전체·이유 `policy`·세션 허용 버튼·alpha, 세션은 승인 대기) → 허용 → 업스트림 호출 1번 → 모델이 Railway 오류를 받음, 행 `user_allowed` + 오류 |
+| 시나리오 C | `issue_write` 세션 허용 → 이슈 A 생성 → 이슈 B는 `session_allowed`(카드 없음) → `issue_read`로 오염 → 이슈 C 카드는 이유 `policy,tainted`·버튼 없음 → 거부, 이슈 C 없음 |
+| 시나리오 D | 앱 꺼짐: `get_me`는 동작, `create_pull_request`는 `auto_denied`/`app_not_running`, 모델이 "실행 중이 아니라"를 받음, PR 없음 |
+| 읽기 전용 | 켜면 github 26개(쓰기 0), 끄면 43개(쓰기 17). Claude Code가 두 번 모두 `tools/list`를 다시 읽음 |
+
+- 확인 못 한 것: 실제 Railway 재배포(프로젝트 없음), Gmail(GCP 클라이언트 필요, 시나리오 C의 메일 오염), Resend 연결.
