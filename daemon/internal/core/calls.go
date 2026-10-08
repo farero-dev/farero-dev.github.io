@@ -69,17 +69,11 @@ func (c *Core) CallTool(ctx context.Context, gc gateway.Call) *mcp.CallToolResul
 	case policy.Deny:
 		return finish(decision, reason, "", upstream.ErrorResult(msgAppNotRunning))
 	case policy.Ask:
-		if known {
-			c.sessions.SetStatus(logCtx, sessionID, model.StatusWaitingApproval)
-		}
-		res := c.broker.Request(ctx, model.Approval{
+		res := c.ask(ctx, model.Approval{
 			Kind: model.KindPlugin, SessionID: sessionID, SessionLabel: labelOrUnknown(s, known),
 			Agent: call.Agent, Plugin: t.plugin, Tool: t.tool, Input: gc.Args,
 			Reasons: d.Reasons, AllowSession: d.AllowSession,
 		})
-		if known {
-			c.sessions.SetStatus(logCtx, sessionID, model.StatusRunning)
-		}
 		switch {
 		case res.Outcome == broker.Answered && res.Answer == model.AnswerAllowSession:
 			c.policy.GrantPlugin(sessionID, t.plugin, t.tool)
@@ -115,6 +109,18 @@ func (c *Core) CallTool(ctx context.Context, gc gateway.Call) *mcp.CallToolResul
 		errText = "upstream returned an error"
 	}
 	return finish(decision, reason, errText, res)
+}
+
+// ask shows an approval card and waits for it. The session shows
+// waiting_approval while the card is open; afterwards it shows what its hook
+// events say (running, or waiting_input if the turn ended meanwhile).
+func (c *Core) ask(ctx context.Context, a model.Approval) broker.Result {
+	if a.SessionID != "" {
+		logCtx := context.WithoutCancel(ctx)
+		c.sessions.ApprovalOpened(logCtx, a.SessionID)
+		defer c.sessions.ApprovalClosed(logCtx, a.SessionID)
+	}
+	return c.broker.Request(ctx, a)
 }
 
 func labelOrUnknown(s model.Session, known bool) string {

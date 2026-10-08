@@ -269,12 +269,7 @@ func (c *Core) SweepLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, pid := range c.sessions.Sweep(ctx, processAlive) {
-				// A reused PID may belong to another claude by now.
-				if !processExists(pid) {
-					c.corr.Forget(pid)
-				}
-			}
+			c.sessions.Sweep(ctx, processAlive)
 			c.sessions.CheckInterrupts(ctx)
 		}
 	}

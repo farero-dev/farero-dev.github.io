@@ -98,6 +98,12 @@ type Manager struct {
 
 	transcripts map[string]*transcript // by session id, memory only
 	deadSince   map[string]time.Time   // when the agent process was first seen gone
+	// approvals counts each session's open approval cards (memory only).
+	// While one is open the session shows waiting_approval whatever its
+	// hook events say: a gateway call can wait for its card after Claude
+	// Code moved it to the background and ended the turn (120 s, Claude
+	// Code 2.1.293), and the user can type a new prompt meanwhile.
+	approvals map[string]int
 
 	// pubMu orders publishing (store, then onUpdate). Changes happen under
 	// mu, and every publisher sends the state as it is when its turn comes,
@@ -121,7 +127,7 @@ type transcript struct {
 // every change, outside the lock.
 func NewManager(ctx context.Context, st *store.Store, onUpdate func(model.Session)) (*Manager, error) {
 	m := &Manager{store: st, now: time.Now, sessions: map[string]*model.Session{}, onUpdate: onUpdate,
-		transcripts: map[string]*transcript{}, deadSince: map[string]time.Time{}}
+		transcripts: map[string]*transcript{}, deadSince: map[string]time.Time{}, approvals: map[string]int{}}
 	list, err := st.Sessions(ctx)
 	if err != nil {
 		return nil, err
@@ -191,7 +197,7 @@ func (m *Manager) Apply(ctx context.Context, agent string, in HookInput, tty str
 			}
 		}
 	}
-	snap := *s
+	snap := m.view(s)
 	m.mu.Unlock()
 
 	if err := m.publish(ctx, id); err != nil {
@@ -203,28 +209,65 @@ func (m *Manager) Apply(ctx context.Context, agent string, in HookInput, tty str
 	return snap, nil
 }
 
-// publish stores a session's current state and tells onUpdate.
+// publish stores a session's current state and tells onUpdate. The store
+// gets the status from hook events: open cards do not outlive farerod.
 func (m *Manager) publish(ctx context.Context, id string) error {
 	m.pubMu.Lock()
 	defer m.pubMu.Unlock()
 	m.mu.Lock()
 	s, ok := m.sessions[id]
-	var snap model.Session
+	var stored, shown model.Session
 	if ok {
-		snap = *s
+		stored, shown = *s, m.view(s)
 	}
 	cb := m.onUpdate
 	m.mu.Unlock()
 	if !ok {
 		return nil // deleted meanwhile
 	}
-	if err := m.store.UpsertSession(ctx, snap); err != nil {
+	if err := m.store.UpsertSession(ctx, stored); err != nil {
 		return err
 	}
 	if cb != nil {
-		cb(snap)
+		cb(shown)
 	}
 	return nil
+}
+
+// view is the session as shown and stored: an open approval card wins over
+// the status from hook events. m.mu must be held.
+func (m *Manager) view(s *model.Session) model.Session {
+	v := *s
+	if m.approvals[s.ID] > 0 && (v.Status == model.StatusRunning || v.Status == model.StatusWaitingInput) {
+		v.Status = model.StatusWaitingApproval
+	}
+	return v
+}
+
+// ApprovalOpened records an approval card shown for the session.
+func (m *Manager) ApprovalOpened(ctx context.Context, id string) { m.countApproval(ctx, id, 1) }
+
+// ApprovalClosed records that one of the session's cards was answered or
+// withdrawn. The session goes back to the status its hook events gave it.
+func (m *Manager) ApprovalClosed(ctx context.Context, id string) { m.countApproval(ctx, id, -1) }
+
+func (m *Manager) countApproval(ctx context.Context, id string, d int) {
+	m.mu.Lock()
+	s, ok := m.sessions[id]
+	var before model.Session
+	if ok {
+		before = m.view(s)
+	}
+	if n := m.approvals[id] + d; n > 0 {
+		m.approvals[id] = n
+	} else {
+		delete(m.approvals, id)
+	}
+	changed := ok && m.view(s).Status != before.Status
+	m.mu.Unlock()
+	if changed {
+		_ = m.publish(ctx, id)
+	}
 }
 
 // transition applies one event of the state machine (아키텍처 6장). seen is
@@ -293,7 +336,7 @@ func (m *Manager) Get(id string) (model.Session, bool) {
 	if !ok {
 		return model.Session{}, false
 	}
-	return *s, true
+	return m.view(s), true
 }
 
 // List returns all sessions, newest first.
@@ -302,14 +345,14 @@ func (m *Manager) List() []model.Session {
 	defer m.mu.Unlock()
 	out := make([]model.Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		out = append(out, *s)
+		out = append(out, m.view(s))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	return out
 }
 
-// SetStatus changes a session's status (approval waits started by the
-// gateway, and the return to running afterwards).
+// SetStatus changes a session's status from hook-event knowledge the state
+// machine does not see (an agent tool allowed or denied by farero runs on).
 func (m *Manager) SetStatus(ctx context.Context, id, status string) {
 	m.mutate(ctx, id, func(s *model.Session) bool {
 		if s.Status == status || s.Status == model.StatusEnded {
@@ -369,6 +412,7 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	delete(m.sessions, id)
 	delete(m.transcripts, id)
 	delete(m.deadSince, id)
+	// approvals stays: a card still open closes through ApprovalClosed.
 	m.mu.Unlock()
 	return nil
 }

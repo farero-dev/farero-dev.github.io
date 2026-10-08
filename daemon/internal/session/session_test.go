@@ -236,3 +236,53 @@ func TestQuestionWaitsForInput(t *testing.T) {
 		t.Fatalf("got %s/%q", got.Status, got.CurrentTool)
 	}
 }
+
+// An open approval card shows the session as waiting_approval, but the store
+// keeps the status from hook events: cards do not survive farerod, so a
+// reload must not show a card that is gone.
+func TestOpenCardIsShownNotStored(t *testing.T) {
+	m, st, updates := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, "claude", ev(EventSessionStart, ""), "", 0)
+	m.ApprovalOpened(ctx, "claude:s1")
+	m.Apply(ctx, "claude", ev(EventStop, ""), "", 0)
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingApproval {
+		t.Fatalf("shown: %s", s.Status)
+	}
+	if last := (*updates)[len(*updates)-1]; last.Status != model.StatusWaitingApproval {
+		t.Fatalf("sent to the app: %s", last.Status)
+	}
+	m2, err := NewManager(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, _ := m2.Get("claude:s1"); s.Status != model.StatusWaitingInput {
+		t.Fatalf("after reload: %s", s.Status)
+	}
+	m.ApprovalClosed(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingInput {
+		t.Fatalf("after the card closed: %s", s.Status)
+	}
+}
+
+// Deleting a session does not forget its open cards: if a hook event brings
+// the session back, it still shows waiting_approval until they close.
+func TestDeleteKeepsOpenCards(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, "claude", ev(EventSessionStart, ""), "", 0)
+	m.ApprovalOpened(ctx, "claude:s1")
+	if err := m.Delete(ctx, "claude:s1"); err != nil {
+		t.Fatal(err)
+	}
+	m.Apply(ctx, "claude", ev(EventUserPromptSubmit, ""), "", 0)
+	m.ApprovalOpened(ctx, "claude:s1")
+	m.ApprovalClosed(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingApproval {
+		t.Fatalf("one card still open: %s", s.Status)
+	}
+	m.ApprovalClosed(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusRunning {
+		t.Fatalf("all cards closed: %s", s.Status)
+	}
+}
