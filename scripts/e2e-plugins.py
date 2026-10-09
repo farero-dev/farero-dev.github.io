@@ -17,12 +17,12 @@ with `farero-devctl watch` as the app). The harness (pseudo-terminals,
 isolation from the developer's ~/.claude) is scripts/e2elib.py.
 
 Test targets: the private repository farero-dev/farero-e2e (issues are
-created there and closed at the end with `gh`, not through farero). The
-Railway account has no project (its trial expired), so scenario B checks the
-card, the allow and the single upstream call with made-up ids; Railway's
-answer is reported as a fact. Gmail (scenario C's mail taint source) and
-Resend are not connected yet: scenario C uses GitHub issue_read, which is a
-taint source too.
+created there and closed at the end with `gh`, not through farero), and in
+the connected Railway account the project farero-e2e with one service
+whoami from the image traefik/whoami (scenario B redeploys it; the script
+finds the ids by name and stops if the project is missing). Gmail
+(scenario C's mail taint source) is not connected yet: scenario C uses
+GitHub issue_read, which is a taint source too.
 
 What it checks (MVP 구현 순서 M5 완료 기준):
   1. The classification table against the live tools/list
@@ -33,10 +33,13 @@ What it checks (MVP 구현 순서 M5 완료 기준):
      railway_* tools (not railway_railway-agent or github_ui_get), with
      annotations from the table.
   3. github_get_me and railway_whoami (auto): no card, auto_allowed, tied to
-     alpha; get_me returns the gh login.
+     alpha; get_me returns the gh login, whoami the Railway account label.
   4. Scenario B: railway_redeploy -> card (plugin, tool, whole input, reason
      policy, session grant offered, session alpha) -> allow -> one upstream
-     call, no retry, row user_allowed; the model gets Railway's answer.
+     call, no retry, row user_allowed; the model gets Railway's answer; a
+     new deployment of whoami reaches SUCCESS and its logs show the
+     container started (read through a raw MCP client, so alpha is not
+     tainted before scenario C).
   5. Scenario C: github_issue_write allowed for the session -> a second
      issue_write runs without a card (session_allowed) -> github_issue_read
      taints the session -> the next issue_write asks again with reasons
@@ -77,9 +80,13 @@ OWNER, REPO = "farero-dev", "farero-e2e"
 RUN = time.strftime("%m%d-%H%M%S")
 # GitHub table entries outside the default toolsets (they stay blocked).
 GITHUB_MAY_MISS = {"delete_repository", "assign_copilot_to_issue", "request_copilot_review"}
-REDEPLOY = {"projectId": "00000000-0000-0000-0000-000000000000",
-            "serviceId": "00000000-0000-0000-0000-000000000001",
-            "environmentId": "00000000-0000-0000-0000-000000000002"}
+# Scenario B's target in the connected Railway account: a project with one
+# image service. Railway writes "Starting Container" into every deployment's
+# deploy log; the app's own first line ("Starting up on port 80") was missing
+# from one of three deployments, so it is not checked.
+RAILWAY_PROJECT, RAILWAY_SERVICE, RAILWAY_ENV = "farero-e2e", "whoami", "production"
+RAILWAY_STARTED = "Starting Container"
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
 FACTS = []  # (label, text) printed at the end
 CREATED = []  # issue numbers this run created, closed at the end
@@ -156,9 +163,10 @@ def issues_titled(title):
 
 def created_issue(row):
     """The issue an issue_write row created, read back from GitHub by the
-    number in its result ({"id", "url": ".../issues/<n>"}), or None."""
-    url = parsed((row or {}).get("result_text") or "").get("url") or ""
-    m = re.search(rf"/{OWNER}/{REPO}/issues/(\d+)$", url)
+    number in its result, or None. The result's shape drifts (2026-10-08
+    {"id", "url"}, 2026-10-09 {"issue": {"id", "url"}, "method"}), so this
+    looks for the issue URL anywhere in it."""
+    m = re.search(rf"/{OWNER}/{REPO}/issues/(\d+)\b", (row or {}).get("result_text") or "")
     if not m:
         return None
     CREATED.append(int(m[1]))
@@ -333,34 +341,62 @@ def step_table(h):
     return out
 
 
+class RawClient:
+    """A fresh raw MCP client of the gateway, outside any claude session (its
+    calls are tied to no session, so taint sources taint nothing)."""
+
+    def __init__(self, h):
+        srv = json.load(open(os.path.join(h.e, "mcp.json")))["mcpServers"]["farero"]
+        self.url = srv["url"]
+        self.base = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                     **gateway_headers(h, srv["headersHelper"])}
+        init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                           "clientInfo": {"name": "farero-e2e", "version": "1"}}}
+        st, rh, body = http(self.url, init, self.base)
+        res = (rpc_result(rh, body, 1) or {}).get("result") or {}
+        if st != 200 or not res.get("protocolVersion"):
+            raise Abort(f"raw initialize failed: {st} {body[:200]!r}")
+        self.sid = rh.get("Mcp-Session-Id")
+        self.s = dict(self.base, **({"Mcp-Session-Id": self.sid} if self.sid else {}),
+                      **{"Mcp-Protocol-Version": res["protocolVersion"]})
+        http(self.url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, self.s)
+        self.n = 2
+
+    def request(self, method, params, timeout=60):
+        n, self.n = self.n, self.n + 1
+        st, rh, body = http(self.url, {"jsonrpc": "2.0", "id": n, "method": method, "params": params}, self.s,
+                            timeout=timeout)
+        return (rpc_result(rh, body, n) or {}).get("result") or {}
+
+    def tools(self):
+        """{name: tool} the gateway lists."""
+        tools, cursor = {}, None
+        while True:
+            r = self.request("tools/list", {"cursor": cursor} if cursor else {})
+            for t in r.get("tools") or []:
+                tools[t["name"]] = t
+            cursor = r.get("nextCursor")
+            if not cursor:
+                return tools
+
+    def call(self, name, args):
+        """(is_error, text) of one tools/call."""
+        r = self.request("tools/call", {"name": name, "arguments": args})
+        return bool(r.get("isError")), "\n".join(c.get("text", "") for c in r.get("content") or [])
+
+    def close(self):
+        if self.sid:
+            http(self.url, None, dict(self.base, **{"Mcp-Session-Id": self.sid}), method="DELETE")
+
+
 def raw_tools(h):
     """{name: tool} the gateway lists to a fresh raw MCP client."""
-    srv = json.load(open(os.path.join(h.e, "mcp.json")))["mcpServers"]["farero"]
-    url, hdrs = srv["url"], gateway_headers(h, srv["headersHelper"])
-    base = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream", **hdrs}
-    init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-11-25", "capabilities": {},
-                       "clientInfo": {"name": "farero-e2e", "version": "1"}}}
-    st, rh, body = http(url, init, base)
-    res = (rpc_result(rh, body, 1) or {}).get("result") or {}
-    if st != 200 or not res.get("protocolVersion"):
-        raise Abort(f"raw initialize failed: {st} {body[:200]!r}")
-    sid = rh.get("Mcp-Session-Id")
-    s_hdr = dict(base, **({"Mcp-Session-Id": sid} if sid else {}), **{"Mcp-Protocol-Version": res["protocolVersion"]})
-    http(url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, s_hdr)
-    tools, cursor, n = {}, None, 2
-    while True:
-        st, rh, body = http(url, {"jsonrpc": "2.0", "id": n, "method": "tools/list",
-                                  "params": {"cursor": cursor} if cursor else {}}, s_hdr, timeout=60)
-        r = (rpc_result(rh, body, n) or {}).get("result") or {}
-        for t in r.get("tools") or []:
-            tools[t["name"]] = t
-        cursor, n = r.get("nextCursor"), n + 1
-        if not cursor:
-            break
-    if sid:
-        http(url, None, dict(base, **{"Mcp-Session-Id": sid}), method="DELETE")
-    return tools
+    c = RawClient(h)
+    try:
+        return c.tools()
+    finally:
+        c.close()
 
 
 def step_raw_list(h, table):
@@ -406,7 +442,7 @@ def step_raw_list(h, table):
 # Steps: alpha
 
 
-def step_auto(h, a, login):
+def step_auto(h, a, login, railway_label):
     h.section("github_get_me and railway_whoami (auto): no card, auto_allowed, tied to alpha")
     since = ask_call(h, a, "github_get_me", {})
     row = wait_row(h, "github", "get_me", {}, since)
@@ -421,8 +457,7 @@ def step_auto(h, a, login):
     turn_end(h, a, since2)
     h.check(row and row["decision"] == "auto_allowed" and row["session_id"] == a.sid and not row["error"],
             "railway whoami: auto_allowed, alpha's session, no error", row_desc(row))
-    # The same person logged in to Railway with GitHub (@<login>).
-    check_result(h, a, "railway_whoami", {}, False, login)
+    check_result(h, a, "railway_whoami", {}, False, railway_label)
     if row:
         fact(h, "auto", f"railway whoami {row['duration_ms']} ms")
     h.check(not cards_since(h, since), "no approval card")
@@ -431,40 +466,96 @@ def step_auto(h, a, login):
             "one connection id carrying alpha's claude PID", f"{sorted(conns)} pid {a.proc.pid}")
 
 
-def step_redeploy(h, a):
-    h.section("scenario B: railway_redeploy -> card -> allow -> one upstream call -> log")
-    since = ask_call(h, a, "railway_redeploy", REDEPLOY,
-                     " These ids are test values; the call is expected to fail on Railway's side.")
-    card = wait_card(h, "railway", "redeploy", REDEPLOY, since)
-    if not card:
-        turn_end(h, a, since)
-        return
-    h.check(card.get("input") == REDEPLOY, "card: the whole input", json.dumps(card.get("input")))
-    h.check(card.get("reasons") == ["policy"] and card.get("allow_session") is True,
-            "card: reasons [policy], 'allow for this session' offered",
-            f"reasons={card.get('reasons')} allow_session={card.get('allow_session')}")
-    h.check(card.get("session_id") == a.sid and card.get("session_label") == "alpha",
-            "card: session alpha", f"{card.get('session_id')} / {card.get('session_label')!r}")
-    h.check(h.wait(lambda: h.status(a.sid) == "waiting_approval", 5), "alpha: waiting_approval while the card is open")
-    t_allow = time.time()
-    h.check(h.answer(card["id"], "allow") == "ok", "answered allow")
-    row = wait_row(h, "railway", "redeploy", REDEPLOY, since)
-    r = tool_result(h, a, "railway_redeploy", REDEPLOY, 60)
-    end = turn_end(h, a, since) or time.time()
-    h.check(row and row["decision"] == "user_allowed" and row["reason"] == "policy",
-            "audit log: user_allowed, reason policy", row_desc(row))
-    h.check(r is not None, "the model got Railway's answer", "no tool_result in the transcript")
-    allrows = rows(h, "railway", "redeploy", REDEPLOY, since)
-    calls = [m for m in mcp_requests(h, since, "tools/call") if m["t"] <= end]
-    # farero calls the upstream once per gateway call and never retries.
-    h.check(len(allrows) == 1 and len(calls) == 1, "one tools/call reached the gateway and one row was logged",
-            f"rows {len(allrows)}, tools/call {len(calls)}")
-    if row:
-        fact(h, "B", f"Railway answered after allow in {row['duration_ms']} ms (row; card included): "
-                     f"error={row['error']!r} result={(row['result_text'] or '')[:300]!r}")
-    if r:
-        fact(h, "B", f"the model got is_error={r[0]} {r[1][:300]!r}")
-    fact(h, "B", f"allow -> turn end {end - t_allow:.1f} s")
+def railway_target(h):
+    """{projectId, serviceId, environmentId} of the scenario B service, found
+    by name with auto tools through a raw MCP client."""
+    c = RawClient(h)
+    try:
+        err, text = c.call("railway_list-projects", {})
+        m = re.search(rf"\*\*{re.escape(RAILWAY_PROJECT)}\*\* \(({UUID})\)", text)
+        if err or not m:
+            raise Abort(f"the connected Railway account has no project {RAILWAY_PROJECT!r}: create it with a service "
+                        f"{RAILWAY_SERVICE!r} from the image traefik/whoami (list-projects: {text[:200]!r})")
+        err, text = c.call("railway_list-services", {"projectId": m[1]})
+        svc = re.search(rf"^- {re.escape(RAILWAY_SERVICE)} \(({UUID})\)", text, re.M)
+        env = re.search(rf"^- {re.escape(RAILWAY_ENV)} \(({UUID})\)", text, re.M)
+        if err or not svc or not env:
+            raise Abort(f"project {RAILWAY_PROJECT!r} has no service {RAILWAY_SERVICE!r} in {RAILWAY_ENV!r}: "
+                        f"{text[:300]!r}")
+        return {"projectId": m[1], "serviceId": svc[1], "environmentId": env[1]}
+    finally:
+        c.close()
+
+
+def latest_deployment(c, target):
+    """(id, status) of the service's newest deployment, or (None, None)."""
+    err, text = c.call("railway_list-deployments", dict(target, limit=1))
+    m = re.search(rf"\*\*({UUID})\*\* \[([A-Z_]+)\]", text)
+    return (m[1], m[2]) if m and not err else (None, None)
+
+
+def step_redeploy(h, a, target):
+    h.section("scenario B: railway_redeploy -> card -> allow -> a new deployment -> its logs")
+    c = RawClient(h)
+    try:
+        before, status = latest_deployment(c, target)
+        h.note(f"newest deployment before: {before} [{status}]")
+        since = ask_call(h, a, "railway_redeploy", target)
+        card = wait_card(h, "railway", "redeploy", target, since)
+        if not card:
+            turn_end(h, a, since)
+            return
+        h.check(card.get("input") == target, "card: the whole input", json.dumps(card.get("input")))
+        h.check(card.get("reasons") == ["policy"] and card.get("allow_session") is True,
+                "card: reasons [policy], 'allow for this session' offered",
+                f"reasons={card.get('reasons')} allow_session={card.get('allow_session')}")
+        h.check(card.get("session_id") == a.sid and card.get("session_label") == "alpha",
+                "card: session alpha", f"{card.get('session_id')} / {card.get('session_label')!r}")
+        h.check(h.wait(lambda: h.status(a.sid) == "waiting_approval", 5),
+                "alpha: waiting_approval while the card is open")
+        t_allow = time.time()
+        h.check(h.answer(card["id"], "allow") == "ok", "answered allow")
+        row = wait_row(h, "railway", "redeploy", target, since)
+        r = tool_result(h, a, "railway_redeploy", target, 60)
+        end = turn_end(h, a, since) or time.time()
+        h.check(row and row["decision"] == "user_allowed" and row["reason"] == "policy" and not row["error"],
+                "audit log: user_allowed, reason policy, no error", row_desc(row))
+        h.check(r and not r[0], "the model got Railway's answer (not an error)",
+                r and f"is_error={r[0]} text={r[1][:300]!r}" or "no tool_result in the transcript")
+        allrows = rows(h, "railway", "redeploy", target, since)
+        calls = [m for m in mcp_requests(h, since, "tools/call") if m["t"] <= end]
+        # farero calls the upstream once per gateway call and never retries.
+        h.check(len(allrows) == 1 and len(calls) == 1, "one tools/call reached the gateway and one row was logged",
+                f"rows {len(allrows)}, tools/call {len(calls)}")
+        if row:
+            fact(h, "B", f"redeploy row after allow: {row['duration_ms']} ms (card included), "
+                         f"result {(row['result_text'] or '')[:200]!r}")
+        fact(h, "B", f"allow -> turn end {end - t_allow:.1f} s")
+
+        # Railway's side: the redeploy made a new deployment that comes up.
+        def deployed():
+            dep = latest_deployment(c, target)
+            if dep[0] and dep[0] != before and dep[1] in ("SUCCESS", "FAILED", "CRASHED"):
+                return dep
+            h.sleep(5.0)
+            return None
+        dep = h.wait(deployed, 240) or latest_deployment(c, target)
+        h.check(dep[0] and dep[0] != before and dep[1] == "SUCCESS", "Railway: a new deployment reached SUCCESS",
+                f"newest {dep[0]} [{dep[1]}], before {before}")
+        fact(h, "B", f"allow -> new deployment {dep[0]} [{dep[1]}] in {time.time() - t_allow:.0f} s")
+        if dep[0] and dep[0] != before:
+            last = [(True, "")]
+
+            def started():
+                last[0] = c.call("railway_get-logs", {"projectId": target["projectId"], "deploymentId": dep[0]})
+                if not last[0][0] and RAILWAY_STARTED in last[0][1]:
+                    return True
+                h.sleep(3.0)
+                return False
+            h.check(h.wait(started, 60), f"Railway: the new deployment's logs show {RAILWAY_STARTED!r}",
+                    f"is_error={last[0][0]} {last[0][1][:300]!r}")
+    finally:
+        c.close()
 
 
 def issue_args(title):
@@ -614,13 +705,14 @@ def main():
     try:
         h.start_daemon()
         h.start_watch()
-        step_plugins(h)
+        state = step_plugins(h)
         table = step_table(h)
         step_register(h)
+        target = railway_target(h)  # through the gateway, so after register (mcp.json)
         step_raw_list(h, table)
         a = start_agent(h, "alpha")
-        step_auto(h, a, login)
-        step_redeploy(h, a)
+        step_auto(h, a, login, state["railway"]["account_label"])
+        step_redeploy(h, a, target)
         step_taint(h, a)
         step_app_off(h, a)
         step_read_only(h, a)

@@ -362,3 +362,24 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
 | 읽기 전용 | 켜면 github 26개(쓰기 0), 끄면 43개(쓰기 17). Claude Code가 두 번 모두 `tools/list`를 다시 읽음 |
 
 - 확인 못 한 것: 실제 Railway 재배포(프로젝트 없음), Gmail(GCP 클라이언트 필요, 시나리오 C의 메일 오염), Resend 연결.
+
+## 2026-10-09
+
+### M5 실제 재배포 (Railway 새 계정)
+사용자가 Railway 계정을 새로 만들었다(체험 크레딧 있음). 개발 데몬(`/tmp/frm5`)의 Railway 연결을 끊고 새 계정으로 다시 연결했다. 계정 표시는 Markdown 없이 `아브아12`로 나왔다(어제 고친 `firstLine`). 터미널의 `railway` CLI는 다른 계정에 로그인돼 있어서 건드리지 않았다.
+- **시험 대상:** 새 계정에 프로젝트 `farero-e2e`와 서비스 `whoami`(이미지 `traefik/whoami`)를 만들었다. CLI 대신 farero 게이트웨이의 `create-project`·`create-service`로 만들었고, 둘 다 승인 카드(이유 `policy, unknown_session`)를 거쳤다. 첫 배포는 SUCCESS였다.
+- **시나리오 B:** 이제 실제로 재배포한다.
+  - 흐름: 모델의 `railway_redeploy` → 카드 → 허용 → 업스트림 호출 1번 → Railway가 "Redeployment triggered successfully!"와 새 배포 ID를 돌려준다.
+  - 허용 뒤 약 18초 안에 새 배포가 SUCCESS가 됐다(세 번 실행).
+  - 새 배포의 배포 로그는 원시 MCP 클라이언트로 `get-logs`를 불러 확인했다. 세션 밖 호출이라 alpha가 오염되지 않아 시나리오 C에 영향이 없다.
+- **확인한 사실:**
+  - Railway 배포 로그에는 Railway 자체 줄 `Starting Container`가 매번 있다.
+  - 앱이 처음 찍는 줄(`Starting up on port 80`)은 세 번 중 한 번은 끝까지 없었다. 그래서 검사는 `Starting Container`로 한다.
+  - GitHub MCP의 `issue_write` 결과 형식이 하루 만에 바뀌었다: `{"id","url"}` → `{"issue":{"id","url"},"method":"create"}`. e2e는 결과 안의 이슈 URL을 형식과 상관없이 찾는다.
+- **e2e 바뀐 점:**
+  - Railway 대상은 프로젝트·서비스 이름으로 ID를 찾고, 없으면 만드는 방법을 알리고 멈춘다.
+  - `railway_whoami` 결과는 GitHub 로그인 대신 연결된 계정 표시와 비교한다.
+  - 원시 MCP 클라이언트를 `RawClient`(도구 목록·호출)로 묶었다.
+- **실수 기록:** 수동으로 띄운 개발 farerod에 `FARERO_GITHUB_CLIENT_ID`를 빠뜨렸다. 복원이 "client id 없음"으로 실패해 GitHub가 `expired`로 표시됐다(토큰 자체는 유효). 개발 DB의 상태만 되돌렸다.
+- **Resend:** 사용자가 이제 가능하다고 해 연결을 두 번 시작했지만, 두 번 모두 10분 안에 브라우저 승인이 끝나지 않아 시간 초과됐다. 인가 주소(`api.resend.com/oauth/authorize`, CIMD client_id)는 302로 정상 응답한다.
+- `scripts/e2e-plugins.py` 검사 74개 통과.
