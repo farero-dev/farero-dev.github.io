@@ -5,13 +5,14 @@ B·C·D) with a real, interactive Claude Code.
     scripts/e2e-plugins.py
 
 A development farerod runs in E2E_DIR (default /tmp/frm5), which keeps the
-GitHub and Railway credentials between runs: everything in it is removed
-except dev-secrets.json (the dev file secret store) and farero.db (plugin
-rows). Plugins that are not connected are connected first, interactively
-(`farero-devctl plugin connect`: a device code for GitHub, a browser login
-for Railway). farero is registered into an isolated Claude config, and one
-`claude` session (folder `alpha` under build/e2e-plugins) calls the real
-plugin tools through the gateway (mcp__farero__github_* / railway_*). The
+GitHub, Railway and Resend credentials between runs: everything in it is
+removed except dev-secrets.json (the dev file secret store) and farero.db
+(plugin rows). Plugins that are not connected are connected first,
+interactively (`farero-devctl plugin connect`: a device code for GitHub, a
+browser login for Railway and Resend). farero is registered into an isolated
+Claude config, and one `claude` session (folder `alpha` under
+build/e2e-plugins) calls the real plugin tools through the gateway
+(mcp__farero__github_* / railway_* / resend_*). The
 script answers approval cards like the app would (`farero-devctl answer`,
 with `farero-devctl watch` as the app). The harness (pseudo-terminals,
 isolation from the developer's ~/.claude) is scripts/e2elib.py.
@@ -20,34 +21,43 @@ Test targets: the private repository farero-dev/farero-e2e (issues are
 created there and closed at the end with `gh`, not through farero), and in
 the connected Railway account the project farero-e2e with one service
 whoami from the image traefik/whoami (scenario B redeploys it; the script
-finds the ids by name and stops if the project is missing). Gmail
+finds the ids by name and stops if the project is missing). Resend sends
+from its shared domain onboarding@resend.dev to its test inbox
+delivered@resend.dev, so no verified domain is needed and no one gets the
+mail. Gmail
 (scenario C's mail taint source) is not connected yet: scenario C uses
 GitHub issue_read, which is a taint source too.
 
 What it checks (MVP 구현 순서 M5 완료 기준):
   1. The classification table against the live tools/list
-     (`farero-devctl plugin tools`): every upstream tool is classified; no
-     Railway table entry is missing upstream; GitHub misses only tools
-     outside its default toolsets (delete_repository and the copilot ones).
-  2. A raw MCP client sees exactly the classified, unblocked github_* and
-     railway_* tools (not railway_railway-agent or github_ui_get), with
-     annotations from the table.
-  3. github_get_me and railway_whoami (auto): no card, auto_allowed, tied to
-     alpha; get_me returns the gh login, whoami the Railway account label.
+     (`farero-devctl plugin tools`): every GitHub and Railway tool is
+     classified; no Railway or Resend table entry is missing upstream;
+     GitHub misses only tools outside its default toolsets
+     (delete_repository and the copilot ones). Resend classifies only its
+     mail tools (기능 명세서 F-07, Q48): the others stay hidden.
+  2. A raw MCP client sees exactly the classified, unblocked github_*,
+     railway_* and resend_* tools (not railway_railway-agent, github_ui_get
+     or resend_share-email), with annotations from the table.
+  3. github_get_me, railway_whoami and resend_list-emails (auto): no card,
+     auto_allowed, tied to alpha; get_me returns the gh login, whoami the
+     Railway account label.
   4. Scenario B: railway_redeploy -> card (plugin, tool, whole input, reason
      policy, session grant offered, session alpha) -> allow -> one upstream
      call, no retry, row user_allowed; the model gets Railway's answer; a
      new deployment of whoami reaches SUCCESS and its logs show the
      container started (read through a raw MCP client, so alpha is not
      tainted before scenario C).
-  5. Scenario C: github_issue_write allowed for the session -> a second
+  5. resend_send-email (ask, no session grant) -> card (whole input,
+     reason policy, no 'allow for this session') -> allow -> row
+     user_allowed; Resend reports the mail delivered to its test inbox.
+  6. Scenario C: github_issue_write allowed for the session -> a second
      issue_write runs without a card (session_allowed) -> github_issue_read
      taints the session -> the next issue_write asks again with reasons
      policy + tainted and no session grant; denied, so no issue is created.
-  6. Scenario D (app not running): github_get_me still works,
+  7. Scenario D (app not running): github_get_me still works,
      github_create_pull_request is auto_denied / app_not_running, the model
      gets the reason, and no pull request exists.
-  7. The GitHub read-only switch (X-MCP-Readonly): only read tools are
+  8. The GitHub read-only switch (X-MCP-Readonly): only read tools are
      exposed and Claude Code re-reads the tool list; switching it off brings
      the write tools back.
 
@@ -87,6 +97,12 @@ GITHUB_MAY_MISS = {"delete_repository", "assign_copilot_to_issue", "request_copi
 RAILWAY_PROJECT, RAILWAY_SERVICE, RAILWAY_ENV = "farero-e2e", "whoami", "production"
 RAILWAY_STARTED = "Starting Container"
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# Resend's shared sending domain and its test inbox: no verified domain is
+# needed, and the mail reaches no one.
+RESEND_FROM, RESEND_TO = "farero e2e <onboarding@resend.dev>", "delivered@resend.dev"
+# Every tool of Resend's hosted MCP requires these two analytics fields.
+RESEND_META = {"context": "Verifying that an approval gateway can reach the mail service for an account.",
+               "llm_model": "farero-e2e"}
 
 FACTS = []  # (label, text) printed at the end
 CREATED = []  # issue numbers this run created, closed at the end
@@ -287,10 +303,10 @@ def alpha_conn(h, a):
 
 
 def step_plugins(h):
-    h.section("plugins: github and railway connected (connect missing ones interactively)")
+    h.section("plugins: github, railway and resend connected (connect missing ones interactively)")
     _, plist = h.devctl("plugin")
     state = {p["plugin"]: p for p in plist or []}
-    for name in ("github", "railway"):
+    for name in ("github", "railway", "resend"):
         p = state.get(name) or {}
         if p.get("status") != "connected":
             if os.environ.get("E2E_NONINTERACTIVE") == "1":
@@ -317,7 +333,7 @@ def step_plugins(h):
 def step_table(h):
     h.section("classification table vs the live tools/list (기능 명세서 6-4)")
     out = {}
-    for name in ("github", "railway"):
+    for name in ("github", "railway", "resend"):
         typ, t = h.devctl("plugin", "tools", name)
         if not h.check(typ == "plugin.tools" and t, f"{name}: plugin.tools answered", typ):
             continue
@@ -327,7 +343,15 @@ def step_table(h):
         blocked = [x["name"] for x in tools if x.get("classified") and not x.get("exposed")]
         missing = t.get("missing") or []
         fact(h, "table", f"{name}: upstream {len(tools)} tools, exposed {len(exposed)}, blocked {sorted(blocked)}, "
-                         f"unclassified {uncl}, table-only {sorted(missing)}")
+                         f"unclassified {uncl if len(uncl) <= 10 else len(uncl)}, table-only {sorted(missing)}")
+        if name == "resend":
+            # Only the mail tools are classified (기능 명세서 F-07, Q48); the
+            # rest (contacts, domains, broadcasts, API keys...) stay hidden.
+            h.check(not missing, "resend: every table entry is listed upstream", f"missing {missing}")
+            h.check(blocked == ["share-email"], "resend: only share-email is blocked among the mail tools",
+                    f"blocked {blocked}")
+            out[name] = t
+            continue
         h.check(not uncl, f"{name}: every upstream tool is classified", f"unclassified {uncl}")
         if name == "railway":
             h.check(not missing, "railway: every table entry is listed upstream", f"missing {missing}")
@@ -400,9 +424,9 @@ def raw_tools(h):
 
 
 def step_raw_list(h, table):
-    h.section("raw MCP client: the exposed github_* / railway_* tools and their annotations")
+    h.section("raw MCP client: the exposed github_* / railway_* / resend_* tools and their annotations")
     tools = raw_tools(h)
-    for name in ("github", "railway"):
+    for name in ("github", "railway", "resend"):
         t = table.get(name)
         if not t:
             continue
@@ -410,8 +434,8 @@ def step_raw_list(h, table):
         got = {n for n in tools if n.startswith(name + "_")}
         h.check(got == want, f"{name}: exposed = classified and unblocked ({len(want)} tools)",
                 f"extra {sorted(got - want)}, missing {sorted(want - got)}")
-    h.check("railway_railway-agent" not in tools and "github_ui_get" not in tools,
-            "railway_railway-agent and github_ui_get are not exposed")
+    h.check(not {"railway_railway-agent", "github_ui_get", "resend_share-email"} & set(tools),
+            "railway_railway-agent, github_ui_get and resend_share-email are not exposed")
     ann = {n: t.get("annotations") or {} for n, t in tools.items()}
 
     def ro(n):
@@ -419,12 +443,13 @@ def step_raw_list(h, table):
 
     def de(n):
         return ann.get(n, {}).get("destructiveHint")
-    h.check(ro("github_get_me") is True and ro("railway_whoami") is True and ro("github_issue_read") is True,
-            "auto tools are readOnlyHint: get_me, whoami, issue_read",
-            f"{ro('github_get_me')} {ro('railway_whoami')} {ro('github_issue_read')}")
-    h.check(all(n in ann and ro(n) is not True for n in ("railway_redeploy", "github_issue_write")),
-            "ask tools are listed and not readOnlyHint: redeploy, issue_write",
-            f"{ro('railway_redeploy')} {ro('github_issue_write')}")
+    auto = ("github_get_me", "railway_whoami", "github_issue_read", "resend_list-emails")
+    h.check(all(ro(n) is True for n in auto), "auto tools are readOnlyHint: get_me, whoami, issue_read, list-emails",
+            " ".join(str(ro(n)) for n in auto))
+    ask = ("railway_redeploy", "github_issue_write", "resend_send-email")
+    h.check(all(n in ann and ro(n) is not True for n in ask),
+            "ask tools are listed and not readOnlyHint: redeploy, issue_write, send-email",
+            " ".join(str(ro(n)) for n in ask))
     h.check(all(de(n) is True for n in ("railway_delete-service", "github_delete_file", "github_push_files")),
             "table-destructive tools are destructiveHint: delete-service, delete_file, push_files",
             f"{de('railway_delete-service')} {de('github_delete_file')} {de('github_push_files')}")
@@ -434,6 +459,7 @@ def step_raw_list(h, table):
     fact(h, "raw", f"gateway lists {len(tools)} tools: "
                    f"github {sum(n.startswith('github_') for n in tools)}, "
                    f"railway {sum(n.startswith('railway_') for n in tools)}, "
+                   f"resend {sum(n.startswith('resend_') for n in tools)}, "
                    f"dev {sum(n.startswith('dev_') for n in tools)}")
     return tools
 
@@ -443,7 +469,7 @@ def step_raw_list(h, table):
 
 
 def step_auto(h, a, login, railway_label):
-    h.section("github_get_me and railway_whoami (auto): no card, auto_allowed, tied to alpha")
+    h.section("github_get_me, railway_whoami and resend_list-emails (auto): no card, auto_allowed, tied to alpha")
     since = ask_call(h, a, "github_get_me", {})
     row = wait_row(h, "github", "get_me", {}, since)
     turn_end(h, a, since)
@@ -460,6 +486,17 @@ def step_auto(h, a, login, railway_label):
     check_result(h, a, "railway_whoami", {}, False, railway_label)
     if row:
         fact(h, "auto", f"railway whoami {row['duration_ms']} ms")
+    args = dict(RESEND_META, limit=3)
+    since3 = ask_call(h, a, "resend_list-emails", args)
+    row = wait_row(h, "resend", "list-emails", args, since3)
+    turn_end(h, a, since3)
+    h.check(row and row["decision"] == "auto_allowed" and row["session_id"] == a.sid and not row["error"],
+            "resend list-emails: auto_allowed, alpha's session, no error", row_desc(row))
+    r = tool_result(h, a, "resend_list-emails", args)
+    h.check(r and not r[0], "the model got Resend's list (not an error)",
+            r and f"is_error={r[0]} text={r[1][:300]!r}" or "no tool_result in the transcript")
+    if row:
+        fact(h, "auto", f"resend list-emails {row['duration_ms']} ms")
     h.check(not cards_since(h, since), "no approval card")
     conns = alpha_conn(h, a)
     h.check(len(conns) == 1 and next(iter(conns)).startswith(f"{a.proc.pid}."),
@@ -554,6 +591,52 @@ def step_redeploy(h, a, target):
                 return False
             h.check(h.wait(started, 60), f"Railway: the new deployment's logs show {RAILWAY_STARTED!r}",
                     f"is_error={last[0][0]} {last[0][1][:300]!r}")
+    finally:
+        c.close()
+
+
+def step_resend(h, a):
+    h.section("resend_send-email (ask, no session grant) -> card -> allow -> delivered to Resend's test inbox")
+    args = dict(RESEND_META, **{"from": RESEND_FROM, "to": [RESEND_TO], "subject": f"farero e2e {RUN}",
+                                "text": "Sent by scripts/e2e-plugins.py through farero."})
+    since = ask_call(h, a, "resend_send-email", args)
+    card = wait_card(h, "resend", "send-email", args, since)
+    if not card:
+        turn_end(h, a, since)
+        return
+    h.check(card.get("input") == args, "card: the whole input", json.dumps(card.get("input"), ensure_ascii=False))
+    # send-email is no_session (외부 발송): approved every time.
+    h.check(card.get("reasons") == ["policy"] and card.get("allow_session") is False,
+            "card: reasons [policy], no 'allow for this session'",
+            f"reasons={card.get('reasons')} allow_session={card.get('allow_session')}")
+    h.check(card.get("session_id") == a.sid, "card: session alpha", card.get("session_id"))
+    t_allow = time.time()
+    h.check(h.answer(card["id"], "allow") == "ok", "answered allow")
+    row = wait_row(h, "resend", "send-email", args, since)
+    r = tool_result(h, a, "resend_send-email", args, 60)
+    turn_end(h, a, since)
+    h.check(row and row["decision"] == "user_allowed" and row["reason"] == "policy" and not row["error"],
+            "audit log: user_allowed, reason policy, no error", row_desc(row))
+    h.check(r and not r[0], "the model got Resend's answer (not an error)",
+            r and f"is_error={r[0]} text={r[1][:300]!r}" or "no tool_result in the transcript")
+    m = re.search(UUID, r[1] if r else "")
+    if not h.check(m, "Resend's answer has the email id", r and r[1][:300]):
+        return
+    # Resend's side, through a raw MCP client (get-email is auto).
+    c = RawClient(h)
+    try:
+        last = [(True, "")]
+
+        def delivered():
+            last[0] = c.call("resend_get-email", dict(RESEND_META, id=m.group(0)))
+            if not last[0][0] and re.search(r"Status:\s*delivered", last[0][1]):
+                return True
+            h.sleep(3.0)
+            return False
+        h.check(h.wait(delivered, 90), "Resend: the email reached the test inbox (status delivered)",
+                f"is_error={last[0][0]} {last[0][1][:300]!r}")
+        fact(h, "resend", f"allow -> delivered in {time.time() - t_allow:.0f} s; "
+                          f"send-email row {row and row['duration_ms']} ms (card included)")
     finally:
         c.close()
 
@@ -713,6 +796,7 @@ def main():
         a = start_agent(h, "alpha")
         step_auto(h, a, login, state["railway"]["account_label"])
         step_redeploy(h, a, target)
+        step_resend(h, a)
         step_taint(h, a)
         step_app_off(h, a)
         step_read_only(h, a)

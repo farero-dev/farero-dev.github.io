@@ -383,3 +383,32 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
 - **실수 기록:** 수동으로 띄운 개발 farerod에 `FARERO_GITHUB_CLIENT_ID`를 빠뜨렸다. 복원이 "client id 없음"으로 실패해 GitHub가 `expired`로 표시됐다(토큰 자체는 유효). 개발 DB의 상태만 되돌렸다.
 - **Resend:** 사용자가 이제 가능하다고 해 연결을 두 번 시작했지만, 두 번 모두 10분 안에 브라우저 승인이 끝나지 않아 시간 초과됐다. 인가 주소(`api.resend.com/oauth/authorize`, CIMD client_id)는 302로 정상 응답한다.
 - `scripts/e2e-plugins.py` 검사 74개 통과.
+
+## 2026-10-10
+
+### M5 Resend 연결
+- **연결 화면:** 2026-10-09의 두 번은 승인 화면 대신 Resend의 API 키 생성 화면이 떠서 시간 초과됐다(사용자 보고).
+  - 인가 주소는 `resend.com/oauth/authorize/<id>`로 넘어간다. 로그인하지 않았으면 `/login`으로 보내고, 돌아올 주소는 쿠키 `redirectedFrom`(10분)에 둔다.
+  - 로그인한 뒤 승인 화면으로 돌아오지 못한 것으로 보인다. 정확한 경로는 재현하지 않았다.
+  - Resend에 로그인된 브라우저에서는 승인 화면이 바로 뜬다: "farero-dev.github.io wants access", 팀 선택, 권한(Full access / Sending access), "Slide to allow", 돌아갈 loopback 주소. 사용자가 Full access로 승인해 연결됐다.
+  - 권한은 화면에서 Sending access로 바꿀 수 있다. 그러면 조회 도구가 동작하지 않는다(Q60).
+  - 계정 표시는 `Resend`다. 팀 이름을 알려 주는 도구가 분류표에 없다.
+- **실제 `tools/list`:** 132개(소스 조사 때 106개).
+  - 분류표의 메일 도구 16개는 모두 있다.
+  - 나머지 116개는 분류하지 않아 숨겨진다: 연락처·세그먼트·토픽, 도메인, 브로드캐스트, 템플릿, 자동화·이벤트, 웹훅, API 키, OAuth 권한, 수신 차단 목록, Inbox(베타), `get_more_tools`. 명세서의 "메일 관련 도구만 노출"(F-07, Q48)대로다.
+  - Inbox(베타) 도구는 받은 메일 스레드 읽기, 답장·전달, 초안 발송을 한다. 메일 관련이지만 베타 계정만 쓸 수 있어 숨겨 둔다(분류는 사용자 결정 대기).
+- **분석용 입력:** 모든 도구에 필수 입력 `context`(호출 목적 15~25단어, 개인정보 금지)와 `llm_model`이 있고, 선택 입력 `conversation_id`가 있다. 결과 끝에는 `{"conversation_id": …}`가 붙는다. 이 값들도 승인 카드의 입력 전체에 그대로 보인다.
+- **게이트웨이를 거친 호출:**
+  - `list-emails`·`list-received-emails`·`get-email`은 자동 허용이다.
+  - `send-email`은 카드(이유 `policy`, 세션 허용 버튼 없음) → 허용 → `onboarding@resend.dev`에서 Resend의 테스트 받은편지함 `delivered@resend.dev`로 보냈다. 인증한 도메인 없이 보낼 수 있고, 사람에게는 가지 않는다. `get-email` 상태는 `delivered`였다.
+- **일시 오류:** `get-email` 한 번이 17.5초 뒤 `connection reset by peer`로 실패했다.
+  - Mac이 절전 중 유지 보수로 잠깐 깨었다가(DarkWake 01:09:59~01:10:44) 다시 잠든 순간이었다(`pmset -g log`). farero 문제는 아니다.
+  - 재시도하지 않는 규칙(5-4)대로 모델에 오류를 돌려줬고, 다시 부르자 1.2초에 성공했다.
+  - e2e는 `caffeinate -i`로 감싸 돌린다.
+- **e2e 바뀐 점 (`scripts/e2e-plugins.py`):**
+  - Resend도 연결돼 있어야 한다.
+  - 분류표: Resend는 분류표 항목이 모두 업스트림에 있고 `share-email`만 차단인지 본다. 분류하지 않은 도구는 숨겨지는 것이 정상이다.
+  - 원시 MCP 클라이언트에 `resend_*` 15개가 보이는지 확인한다.
+  - 자동 허용 `resend_list-emails`를 alpha에서 부른다.
+  - 시나리오 B 뒤에 `resend_send-email` 단계를 넣었다: 카드(입력 전체, 이유 `policy`, 세션 허용 버튼 없음) → 허용 → 행 `user_allowed` → Resend에서 `delivered` 확인.
+- `scripts/e2e-plugins.py` 검사 90개 통과(Claude Code 2.1.296). 메일은 허용 뒤 19초 만에 `delivered`가 됐다. 시나리오 B도 17초 만에 새 배포가 SUCCESS였다.
