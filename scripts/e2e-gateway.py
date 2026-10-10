@@ -58,7 +58,6 @@ E2E_NO_BUILD=1 to reuse build/dev (E2E_BIN: another binary folder). Uses
 python3's standard library only. Exit status is non-zero when a check fails;
 logs, pty transcripts and screens are left in E2E_DIR.
 """
-import glob
 import json
 import os
 import re
@@ -69,12 +68,11 @@ import statistics
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from datetime import datetime
 
-from e2elib import (CLAUDE, ESC, ROOT, Abort, Agent, Harness, prepare, print_daemon_warnings, ready,
-                    step_register, step_remove, wait_card)
+from e2elib import (CLAUDE, ESC, ROOT, Abort, Agent, Harness, farerod_log, gateway_headers, http, mcp_requests,
+                    prepare, print_daemon_warnings, ready, result_text, rpc_result, step_register, step_remove,
+                    transcript, transcript_path, wait_card)
 
 
 def parse_duration(s):
@@ -221,41 +219,6 @@ def card_closed(h, card, since, timeout):
     return h.wait_event("approval.cancelled", lambda d: d.get("approval_id") == card["id"], since, timeout)
 
 
-def transcript_path(a):
-    sid = a.sid.split(":", 1)[-1]
-    paths = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl"))
-    return paths[0] if paths else None
-
-
-def transcript(a):
-    """[(tool_use, tool_result or None)] and the assistant's texts, from
-    Claude Code's own record of the session."""
-    path = transcript_path(a)
-    uses, results, texts = [], {}, []
-    if not path:
-        return [], texts
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            msg = ev.get("message") if isinstance(ev, dict) else None
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if not isinstance(content, list):
-                continue
-            for c in content:
-                if not isinstance(c, dict):
-                    continue
-                if c.get("type") == "tool_use":
-                    uses.append(c)
-                elif c.get("type") == "tool_result":
-                    results[c.get("tool_use_id")] = c
-                elif c.get("type") == "text" and msg.get("role") == "assistant":
-                    texts.append(c.get("text", ""))
-    return [(u, results.get(u.get("id"))) for u in uses], texts
-
-
 def attachments(a, typ):
     """Claude Code's attachment records of a type (for example
     deferred_tools_delta: what it told the model about tools that came or
@@ -315,17 +278,6 @@ def wait_new_text(h, a, n_before, timeout=10):
     return h.wait(hit, timeout) or ""
 
 
-def result_text(res):
-    if not res:
-        return ""
-    c = res.get("content")
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        return "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
-    return ""
-
-
 def tool_result(h, a, tool, text, timeout=15):
     """(is_error, text) of the newest dev_<tool> {"text": text} result the
     model got, or None."""
@@ -344,41 +296,6 @@ def check_result(h, a, tool, text, want_error, want_text):
             f"the model got {'a tool error' if want_error else 'the result'} containing {want_text!r}",
             r and f"is_error={r[0]} text={r[1][:200]!r}" or "no tool_result in the transcript")
     return r
-
-
-LOGKV = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S*)')
-
-
-def farerod_log(h, since=0.0, msg=None):
-    """Parsed farerod.log lines (slog text): dicts with t and the keys."""
-    out = []
-    try:
-        with open(os.path.join(h.e, "farerod.log"), encoding="utf-8", errors="replace") as f:
-            raw = f.read().splitlines()
-    except OSError:
-        return out
-    for line in raw:
-        kv = {}
-        for k, v in LOGKV.findall(line):
-            if v.startswith('"'):
-                try:
-                    v = json.loads(v)
-                except ValueError:
-                    v = v[1:-1]
-            kv[k] = v
-        try:
-            kv["t"] = datetime.fromisoformat(kv.get("time", "")).timestamp()
-        except ValueError:
-            continue
-        if kv["t"] < since or (msg and kv.get("msg") != msg):
-            continue
-        kv["line"] = line
-        out.append(kv)
-    return out
-
-
-def mcp_requests(h, since=0.0, method=None):
-    return [r for r in farerod_log(h, since, "mcp request") if method is None or r.get("method") == method]
 
 
 def hook_events_since(h, a, since, event=None, tool=None):
@@ -406,48 +323,6 @@ def lines(path):
 
 # ---------------------------------------------------------------------------
 # HTTP
-
-
-def http(url, body=None, headers=None, method="POST", timeout=15):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.headers, r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.headers, e.read().decode("utf-8", "replace")
-
-
-def rpc_result(headers, body, want_id):
-    """The JSON-RPC response with want_id from a JSON or SSE body."""
-    msgs = []
-    if "text/event-stream" in (headers.get("Content-Type") or ""):
-        for line in body.splitlines():
-            if line.startswith("data:"):
-                try:
-                    msgs.append(json.loads(line[5:].strip()))
-                except ValueError:
-                    pass
-    else:
-        try:
-            v = json.loads(body)
-            msgs = v if isinstance(v, list) else [v]
-        except ValueError:
-            pass
-    for m in msgs:
-        if isinstance(m, dict) and m.get("id") == want_id:
-            return m
-    return None
-
-
-def gateway_headers(h, helper):
-    """Runs the MCP entry's headersHelper like Claude Code does."""
-    env = dict(os.environ, FARERO_HOME=h.e, FARERO_SOCKET=h.env["FARERO_SOCKET"])
-    p = subprocess.run(helper, shell=True, env=env, capture_output=True, text=True, timeout=10)
-    try:
-        return json.loads(p.stdout)
-    except ValueError:
-        return {}
 
 
 def outbound_ip():

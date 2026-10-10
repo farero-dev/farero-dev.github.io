@@ -51,6 +51,7 @@
         "merge_pull_request": {"level": "ask", "no_session": true, "destructive": true},
 
         "delete_repository": {"level": "block", "destructive": true},
+        "ui_get": {"level": "block"},
         "assign_copilot_to_issue": {"level": "block"},
         "request_copilot_review": {"level": "block"}
       }
@@ -58,17 +59,75 @@
     "railway": {
       "tools": {
         "whoami": {"level": "auto"},
+        "list-workspaces": {"level": "auto"},
         "list-projects": {"level": "auto"},
         "list-services": {"level": "auto"},
+        "list-deployments": {"level": "auto"},
+        "list-domains": {"level": "auto"},
+        "list-tcp-proxies": {"level": "auto"},
+        "list-webhooks": {"level": "auto"},
+        "list-variables": {"level": "auto"},
         "list-feature-flags": {"level": "auto"},
         "get-feature-flag": {"level": "auto"},
+        "describe-environment": {"level": "auto"},
+        "describe-service": {"level": "auto"},
+        "get-service-config": {"level": "auto"},
+        "get-status": {"level": "auto"},
+        "environment-status": {"level": "auto"},
+        "domain-status": {"level": "auto"},
+        "get-staged-changes": {"level": "auto"},
+        "get-service-metrics": {"level": "auto"},
+        "http-error-rate": {"level": "auto"},
+        "http-requests": {"level": "auto"},
+        "http-response-time": {"level": "auto"},
+        "get-tracing": {"level": "auto"},
+        "get-tracing-coverage": {"level": "auto"},
+        "get-function-source-code": {"level": "auto"},
+        "search-docs": {"level": "auto"},
+        "fetch-docs": {"level": "auto"},
+        "search-templates": {"level": "auto"},
+
+        "get-logs": {"level": "auto", "taint": true},
+        "list-traces": {"level": "auto", "taint": true},
+        "get-trace": {"level": "auto", "taint": true},
+        "get-deployment-diagnosis": {"level": "auto", "taint": true},
+        "describe-template": {"level": "auto", "taint": true},
 
         "create-project": {"level": "ask"},
+        "create-service": {"level": "ask"},
+        "create-deployment": {"level": "ask"},
+        "create-function": {"level": "ask"},
+        "create-bucket": {"level": "ask"},
+        "create-volume": {"level": "ask"},
+        "generate-domain": {"level": "ask"},
+        "deploy-template": {"level": "ask"},
+        "set-service-tracing": {"level": "ask"},
+        "retry-domain-certificate": {"level": "ask"},
+        "update-domain": {"level": "ask"},
+        "update-bucket": {"level": "ask"},
+        "update-volume": {"level": "ask"},
+        "restart-service": {"level": "ask"},
         "redeploy": {"level": "ask"},
         "set-feature-flag": {"level": "ask"},
+        "get-bucket-credentials": {"level": "ask"},
 
         "accept-deploy": {"level": "ask", "no_session": true, "destructive": true},
         "delete-feature-flag": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-service": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-volume": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-bucket": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-domain": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-tcp-proxy": {"level": "ask", "no_session": true, "destructive": true},
+        "delete-webhook": {"level": "ask", "no_session": true, "destructive": true},
+        "reset-bucket-credentials": {"level": "ask", "no_session": true, "destructive": true},
+        "set-variables": {"level": "ask", "no_session": true, "destructive": true},
+        "update-function-source-code": {"level": "ask", "no_session": true, "destructive": true},
+        "update-service": {"level": "ask", "no_session": true},
+        "connect-service-source": {"level": "ask", "no_session": true},
+        "create-webhook": {"level": "ask", "no_session": true},
+        "update-webhook": {"level": "ask", "no_session": true},
+        "create-tcp-proxy": {"level": "ask", "no_session": true},
+        "test-webhook": {"level": "ask", "no_session": true},
 
         "railway-agent": {"level": "block"}
       }
@@ -92,7 +151,9 @@
         "update-email": {"level": "ask"},
 
         "send-email": {"level": "ask", "no_session": true},
-        "send-batch-emails": {"level": "ask", "no_session": true}
+        "send-batch-emails": {"level": "ask", "no_session": true},
+
+        "share-email": {"level": "block"}
       }
     },
     "gmail": {

@@ -75,6 +75,11 @@ func (r *Remote) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
 		if lerr == nil {
 			return out, nil
 		}
+		if ctx.Err() != nil {
+			// The caller gave up (a timeout); the connection may be fine
+			// and other calls may be using it.
+			return nil, lerr
+		}
 		r.drop(s)
 		if attempt == 1 {
 			return nil, lerr

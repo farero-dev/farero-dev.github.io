@@ -50,6 +50,7 @@ const (
 	TypePluginDisconnect  = "plugin.disconnect"
 	TypePluginSetOption   = "plugin.set_option"
 	TypePluginPrompt      = "plugin.prompt" // device code / URL the user must act on
+	TypePluginTools       = "plugin.tools"
 	TypeAgentCfgStatus    = "agentcfg.status"
 	TypeAgentCfgPlan      = "agentcfg.plan"
 	TypeAgentCfgApply     = "agentcfg.apply"
@@ -166,6 +167,27 @@ type PluginPrompt struct {
 	UserCode  string    `json:"user_code,omitempty"`
 	URL       string    `json:"url"`
 	ExpiresAt time.Time `json:"expires_at,omitzero"`
+}
+
+// PluginTool is one tool a connected plugin's upstream lists, next to what
+// the classification table makes of it.
+type PluginTool struct {
+	Name            string `json:"name"`
+	Title           string `json:"title,omitempty"`
+	Description     string `json:"description,omitempty"`
+	ReadOnlyHint    bool   `json:"read_only_hint"`             // upstream annotation
+	DestructiveHint *bool  `json:"destructive_hint,omitempty"` // upstream annotation; absent means unset
+	Classified      bool   `json:"classified"`                 // in the table (unclassified tools are hidden)
+	Level           string `json:"level,omitempty"`            // effective level when classified
+	Exposed         bool   `json:"exposed"`                    // agents see it
+}
+
+// PluginTools is the reply to plugin.tools: the live upstream tool list,
+// and the table's tools for that plugin that the upstream no longer lists.
+type PluginTools struct {
+	Plugin  string       `json:"plugin"`
+	Tools   []PluginTool `json:"tools"`
+	Missing []string     `json:"missing"`
 }
 
 // Settings are user-adjustable daemon settings.

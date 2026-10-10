@@ -18,6 +18,7 @@ import (
 	"github.com/farero-dev/farero/daemon/internal/policy"
 	"github.com/farero-dev/farero/daemon/internal/secret"
 	"github.com/farero-dev/farero/daemon/internal/store"
+	"github.com/farero-dev/farero/daemon/internal/upstream"
 	"github.com/farero-dev/farero/daemon/internal/upstream/devplugin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -685,5 +686,43 @@ func TestNotifyReachesApps(t *testing.T) {
 	st, err := ipc.Decode[ipc.AgentCfgStatus](u.next(ipc.TypeAgentCfgStatus))
 	if err != nil || st.Message != "고쳤습니다" {
 		t.Fatalf("%+v %v", st, err)
+	}
+}
+
+// partialPlugin is the dev plugin with fail_sim missing from its tool list,
+// like an upstream that renamed or dropped a classified tool.
+type partialPlugin struct{ upstream.Plugin }
+
+func (p partialPlugin) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
+	all, err := p.Plugin.ListTools(ctx)
+	return slices.DeleteFunc(all, func(t *mcp.Tool) bool { return t.Name == "fail_sim" }), err
+}
+
+func TestPluginToolsReportsClassification(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	h.core.Plugins().Set(partialPlugin{devplugin.New()})
+	u := h.ui()
+	u.conn.Send(ipc.TypePluginTools, "t", ipc.PluginRef{Plugin: "dev"})
+	got, _ := ipc.Decode[ipc.PluginTools](u.next(ipc.TypePluginTools))
+	byName := map[string]ipc.PluginTool{}
+	for _, x := range got.Tools {
+		byName[x.Name] = x
+	}
+	if x := byName["unclassified_sim"]; x.Name == "" || x.Classified || x.Exposed {
+		t.Errorf("unclassified_sim: %+v", x)
+	}
+	if x := byName["blocked_sim"]; !x.Classified || x.Exposed || x.Level != policy.LevelBlock {
+		t.Errorf("blocked_sim: %+v", x)
+	}
+	if x := byName["write_sim"]; !x.Classified || !x.Exposed || x.Level != policy.LevelAsk {
+		t.Errorf("write_sim: %+v", x)
+	}
+	if !slices.Equal(got.Missing, []string{"fail_sim"}) {
+		t.Errorf("missing: %v", got.Missing)
+	}
+
+	u.conn.Send(ipc.TypePluginTools, "g", ipc.PluginRef{Plugin: "github"})
+	if m := u.next(ipc.TypeError); !strings.Contains(string(m.Data), "not connected") {
+		t.Fatalf("expected not connected, got %s", m.Data)
 	}
 }

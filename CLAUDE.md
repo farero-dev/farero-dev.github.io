@@ -28,7 +28,7 @@ go generate ./internal/policy                         # re-copy policy/default.j
 go vet ./...
 ```
 
-End-to-end checks with a real, interactive Claude Code (headless pseudo-terminals, an isolated Claude config dir, a dev farerod under `/tmp`; they take several minutes): `scripts/e2e-sessions.py` (M2 session watching), `scripts/e2e-approvals.py` (M3 agent tool approval; `E2E_APPROVAL_TIMEOUT=10m` for the real deadline), `scripts/e2e-gateway.py` (M4 gateway with the fake `dev` plugin; `E2E_APPROVAL_TIMEOUT=3m` or `10m` runs only the long-wait steps), `scripts/e2e.sh` (`claude -p` through the gateway). The shared harness is `scripts/e2elib.py`. `farero-devctl` stands in for the app (watch, answer cards, log, `policy set`).
+End-to-end checks with a real, interactive Claude Code (headless pseudo-terminals, an isolated Claude config dir, a dev farerod under `/tmp`; they take several minutes): `scripts/e2e-sessions.py` (M2 session watching), `scripts/e2e-approvals.py` (M3 agent tool approval; `E2E_APPROVAL_TIMEOUT=10m` for the real deadline), `scripts/e2e-gateway.py` (M4 gateway with the fake `dev` plugin; `E2E_APPROVAL_TIMEOUT=3m` or `10m` runs only the long-wait steps), `scripts/e2e-plugins.py` (M5 with the real GitHub, Railway and Resend; it keeps the plugin tokens in `E2E_DIR`, default `/tmp/frm5`, connects a missing plugin interactively, writes issues to the private repo `farero-dev/farero-e2e`, redeploys the service `whoami` of the Railway project `farero-e2e`, and sends a mail from `onboarding@resend.dev` to Resend's test inbox `delivered@resend.dev`), `scripts/e2e.sh` (`claude -p` through the gateway). The shared harness is `scripts/e2elib.py`. `farero-devctl` stands in for the app (watch, answer cards, log, `policy set`, `plugin connect|tools|option`).
 
 `experiments/` is a separate Go module (`cd experiments && go build -o bin/<name> ./<dir>`). It holds M0 throwaway code and must never be imported by `daemon/` (Q67).
 
@@ -65,7 +65,7 @@ MCP requests carry no session id, and the `headersHelper` environment does not i
 
 SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows. Call results are truncated to 16KB (Q46).
 
-## Facts verified in M0, M2, M3 and M4 that constrain the code
+## Facts verified in M0 and M2–M5 that constrain the code
 
 - Without a per-server `timeout` in the MCP server entry, Claude Code gives up on a tool call after about 60 s. Register the gateway with `timeout: 660000` so a 10-minute approval can finish. Hook entries use `timeout: 660`.
 - `claude mcp add-json farero '<json>' --scope user` accepts `headersHelper` and `timeout`, so Claude Code writes its own `~/.claude.json` and farero does not have to edit that file by hand.
@@ -81,6 +81,10 @@ SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings wi
 - Internal forks (compaction, prompt suggestions) send `PreToolUse` with `agent_id` but no `agent_type` key, for tools that never run. Real subagents carry both and share the parent's `session_id`.
 - Claude Code before 2.1.101 ignores the whole `settings.json` if it has a hook event name it does not know, so farero refuses to register with a Claude Code older than `MinClaudeVersion`.
 - A hook still running after claude exited is adopted by launchd: its parent PID is 1.
+- GitHub's remote MCP server ignores headers it does not know. Its read-only switch is `X-MCP-Readonly` (`X-MCP-Read-Only` left all 44 default-toolset tools listed). The default toolsets also list the app-only `ui_get` (MCP Apps `visibility: app`), which the table blocks.
+- Railway's remote MCP server listed 68 tools on 2026-10-08, and the table classifies every one. For an OAuth app such as farero, `list-variables` returns variable names only and `get-bucket-credentials` returns no keys.
+- Resend's hosted MCP server listed 132 tools on 2026-10-10. The table classifies only the 16 mail tools (Q48), and the rest stay hidden. Every Resend tool requires the analytics inputs `context` (the call's purpose) and `llm_model`, so they show on approval cards. Resend's consent page (team, Full access or Sending access, "Slide to allow") needs a browser that is already logged in to Resend: logged out, the user goes to `/login` and may end up on Resend's API key screen instead of coming back (seen twice on 2026-10-09).
+- Upstream tool lists drift. `farero-devctl plugin tools <plugin>` (IPC `plugin.tools`) shows the live list next to the table, and farerod logs the upstream tools the table does not classify (they stay hidden).
 - Claude Code 2.1.293 may start in auto mode, where its classifier allows commands without a `PermissionRequest` (no farero card), and its permission prompt gained "Yes, and switch to auto mode" (so "No" moved). The e2e scripts pass `--permission-mode default` and pick prompt options by text.
 
 ## Working rules for this repo

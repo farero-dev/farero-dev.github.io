@@ -133,14 +133,17 @@ func (env *Env) option(ctx context.Context, plugin, key string) string {
 	return st.Options[key]
 }
 
-// firstLine trims tool output to a short account label.
+// firstLine trims tool output to a short account label: the first line
+// without Markdown emphasis (Railway's whoami answers "**name** (@login)"),
+// at most max runes.
 func firstLine(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if len(s) > max {
-		s = s[:max]
+	s = strings.TrimSpace(strings.NewReplacer("**", "", "__", "", "`", "").Replace(s))
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max])
 	}
 	return s
 }
