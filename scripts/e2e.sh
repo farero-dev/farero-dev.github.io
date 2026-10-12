@@ -20,6 +20,8 @@ E="${E2E_DIR:-/tmp/fre2e}"
 MODEL="${E2E_MODEL:-haiku}"
 FAIL=0
 
+PYTHONDONTWRITEBYTECODE=1 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import e2elib; e2elib.check_run_dir(sys.argv[2])' \
+  "$ROOT/scripts" "$E" || exit 2
 rm -rf "$E"
 mkdir -p "$E/claude" "$E/work"
 export FARERO_HOME="$E" FARERO_SOCKET="$E/d.sock" FARERO_CLAUDE_CONFIG_DIR="$E/claude"
