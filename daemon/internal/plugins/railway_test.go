@@ -67,3 +67,69 @@ func TestFirstLineLabel(t *testing.T) {
 		t.Errorf("cut = %q", got)
 	}
 }
+
+// A saved setup is reused only when it decodes cleanly and carries both the
+// client id and the authorization endpoint; each defect alone rejects it.
+func TestRailwaySavedSetupValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		ok   bool
+	}{
+		{"complete", `{"client_id":"c","auth_url":"https://a","token_url":"https://t"}`, true},
+		{"missing client id", `{"auth_url":"https://a"}`, false},
+		{"missing auth url", `{"client_id":"c"}`, false},
+		{"empty client id", `{"client_id":"","auth_url":"https://a"}`, false},
+		{"empty auth url", `{"client_id":"c","auth_url":""}`, false},
+		{"neither", `{}`, false},
+		// A type error still fills the fields decoded before it.
+		{"decode error with both fields", `{"client_id":"c","auth_url":"https://a","token_url":5}`, false},
+		{"not json", `not json`, false},
+	}
+	for _, tc := range cases {
+		if got := savedRailwaySetup(tc.in) != nil; got != tc.ok {
+			t.Errorf("%s: accepted = %v, want %v", tc.name, got, tc.ok)
+		}
+	}
+}
+
+// A registration answer is usable only when it is valid JSON with a client id.
+func TestRailwayRegisterClientRejectsBadAnswer(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"no client id", `{}`},
+		{"empty client id", `{"client_id":""}`},
+		{"not json", `nope`},
+		// The first key is kept, the second is a type error.
+		{"decode error after client id", `{"client_id":"x","client_id":5}`},
+	}
+	for _, tc := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(tc.body))
+		}))
+		id, err := registerClient(context.Background(), srv.URL)
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s: accepted client id %q", tc.name, id)
+		}
+	}
+}
+
+// firstLine edge cases: exactly max runes stays whole, one over is cut, and
+// surrounding blank lines do not hide the first real line.
+func TestFirstLineBounds(t *testing.T) {
+	cases := []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"가나", 2, "가나"},
+		{"가나다", 2, "가나"},
+		{"\n\nabc\ndef", 10, "abc"},
+		{"  **x**  ", 10, "x"},
+	}
+	for _, tc := range cases {
+		if got := firstLine(tc.in, tc.max); got != tc.want {
+			t.Errorf("firstLine(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+		}
+	}
+}
