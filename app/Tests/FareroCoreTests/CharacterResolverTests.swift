@@ -77,6 +77,32 @@ struct CharacterResolverTests {
         #expect(state(s, at: 3) == .caution)
     }
 
+    @Test func unknownSessionShowsDisconnectedForThreeSeconds() {
+        var s = Fixture.connected(sessions: [Fixture.session("s1", status: .waitingInput, tainted: true)])
+        s.reduce(Fixture.msg(.callLogged(Call(sessionID: "", kind: "plugin", decision: CallDecision.autoAllowed))),
+                 now: t0)
+        let r = CharacterResolver.resolve(s, now: t0.addingTimeInterval(1))
+        #expect(r.state == .disconnected)
+        #expect(r.reevaluateAt == t0.addingTimeInterval(3))
+        #expect(state(s, at: 3) == .caution)
+        // A card for it still comes first; error beats it.
+        var carded = s
+        carded.reduce(Fixture.msg(.approvalRequest(Fixture.approval("a1", session: ""))), now: t0)
+        #expect(state(carded, at: 1) == .needsApproval)
+        s.lastErrorAt = t0
+        #expect(state(s, at: 1) == .error)
+    }
+
+    @Test func callsWithASessionAreNotUnknown() {
+        var s = Fixture.connected()
+        s.reduce(Fixture.msg(.callLogged(Call(sessionID: "s1", kind: "plugin", decision: CallDecision.autoAllowed))),
+                 now: t0)
+        // Agent tool rows always belong to a session; an empty id there is not 5-2's 세션 불명.
+        s.reduce(Fixture.msg(.callLogged(Call(sessionID: "", kind: "agent", decision: CallDecision.cancelled))), now: t0)
+        #expect(s.lastUnknownSessionAt == nil)
+        #expect(state(s) == .sleeping)
+    }
+
     @Test func cautionForTaintedLiveSessionOnly() {
         let s = Fixture.connected(sessions: [Fixture.session("s1", tool: "Bash"), Fixture.session("s2", status: .waitingInput, tainted: true)])
         #expect(state(s) == .caution)

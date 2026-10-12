@@ -257,6 +257,9 @@ public struct Call: Sendable, Equatable, Identifiable, Decodable {
         durationMS = c.value(.durationMS, 0)
         error = c.value(.error, "")
     }
+
+    /// A gateway call farerod could not tie to a session (기능 명세서 5-2).
+    public var isUnknownSession: Bool { kind == "plugin" && sessionID.isEmpty }
 }
 
 /// A plugin's connection state.

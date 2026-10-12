@@ -66,26 +66,58 @@ final class AppModel {
         hotKeys.onPress = { [weak self] shortcut in self?.answerFront(shortcut) }
         if Self.debug {
             hotKeys.debugLog = { FileHandle.standardError.write(Data("farero: \($0)\n".utf8)) }
-            installDebugSignals()
+            if let path = ProcessInfo.processInfo.environment["FARERO_DEBUG_CONTROL"], !path.isEmpty {
+                startDebugControl(path: path)
+            }
         }
     }
 
-    @ObservationIgnored private var signalSources: [DispatchSourceSignal] = []
-
-    /// Development aids (FARERO_DEBUG=1): SIGUSR1 toggles the pinned
-    /// (expanded) notch, SIGUSR2 denies the front card through the same
-    /// path the ⌃⌥N shortcut uses.
-    private func installDebugSignals() {
-        signal(SIGUSR1, SIG_IGN)
-        signal(SIGUSR2, SIG_IGN)
-        let pin = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-        pin.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.togglePinned() } }
-        let deny = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
-        deny.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.answerFront(.deny) } }
-        for source in [pin, deny] {
-            source.resume()
-            signalSources.append(source)
+    /// Development aid (FARERO_DEBUG=1, FARERO_DEBUG_CONTROL=<named pipe>):
+    /// scripts/e2e-notch.py drives the notch through the pipe, one command
+    /// per line, without synthesizing input (that needs Accessibility):
+    ///   pin                              toggles the pinned (expanded) island
+    ///   hotkey allow|allow_session|deny  sends the shortcut's hot-key event
+    ///                                    to the app, as a key press does
+    private func startDebugControl(path: String) {
+        // The model lives as long as the app. A strong capture keeps these
+        // closures Sendable; Swift 6.1 rejects sending a weak `self` (a
+        // mutable capture) from this thread to the main actor.
+        let model = self
+        let thread = Thread {
+            while true {
+                // Opening a pipe blocks until a writer opens it; reading ends
+                // when that writer closes it.
+                guard let handle = FileHandle(forReadingAtPath: path) else {
+                    FileHandle.standardError.write(Data("farero: cannot open debug control \(path)\n".utf8))
+                    return
+                }
+                let data = handle.readDataToEndOfFile()
+                try? handle.close()
+                for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+                    let command = String(line).trimmingCharacters(in: .whitespaces)
+                    DispatchQueue.main.async { MainActor.assumeIsolated { model.debugCommand(command) } }
+                }
+            }
         }
+        thread.name = "farero debug control"
+        thread.start()
+    }
+
+    private func debugCommand(_ command: String) {
+        let words = command.split(separator: " ").map(String.init)
+        var done = false
+        switch words.first {
+        case "pin":
+            togglePinned()
+            done = true
+        case "hotkey":
+            if words.count == 2, let s = ApprovalShortcut.allCases.first(where: { $0.answer.rawValue == words[1] }) {
+                done = hotKeys.sendDebugPress(s)
+            }
+        default:
+            break
+        }
+        FileHandle.standardError.write(Data("farero: control \(command): \(done ? "done" : "ignored")\n".utf8))
     }
 
     func start() {
@@ -156,6 +188,7 @@ final class AppModel {
         guard let approval = state.approvals.first(where: { $0.id == approvalID }),
               state.answering[approvalID] == nil else { return }
         if answer == .allowSession && !approval.allowSession { return }
+        debugLog("answer \(approvalID) \(answer.rawValue)")
         dispatch(.answerSent(approvalID: approvalID, answer: answer))
         let client = self.client
         Task { [weak self] in
@@ -175,6 +208,7 @@ final class AppModel {
 
     /// A global shortcut acts on the front (oldest) card.
     func answerFront(_ shortcut: ApprovalShortcut) {
+        debugLog("shortcut \(shortcut.hint)")
         guard let front = state.frontApproval else { return }
         answer(front.id, shortcut.answer)
     }
@@ -205,18 +239,21 @@ final class AppModel {
             guard !Task.isCancelled, let self else { return }
             self.hoverTask = nil
             self.hovering = inside
+            self.debugLog("hover \(inside)")
             for f in self.onChange { f() }
         }
     }
 
     func togglePinned() {
         pinned.toggle()
+        debugLog("pinned \(pinned)")
         for f in onChange { f() }
     }
 
     func unpin() {
         guard pinned else { return }
         pinned = false
+        debugLog("pinned false")
         for f in onChange { f() }
     }
 
