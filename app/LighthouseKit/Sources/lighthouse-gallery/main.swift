@@ -1,6 +1,10 @@
 // lighthouse-gallery renders every lighthouse state to PNG files for design
 // review. Usage: swift run lighthouse-gallery [output-dir]
 // (default /tmp/lighthouse-gallery).
+//
+// The compare-*.png sheets use the same layout as the design canvas export
+// used for review: one cell per state, each size * 1.5 square on black, with
+// the character's square frame at (size / 4, size / 4).
 
 import AppKit
 import ImageIO
@@ -8,13 +12,16 @@ import LighthouseKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-let outputDirectory = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/lighthouse-gallery",
-                          isDirectory: true)
+let outputDirectory = URL(
+    fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/lighthouse-gallery",
+    isDirectory: true)
 try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
 let states = LighthouseState.allCases
 let black = Color.black
 let white = Color.white
+/// The session count shown by `workingMany` (the canvas shows 3).
+let sessionCount = 3
 
 // MARK: - Rendering helpers
 
@@ -31,9 +38,10 @@ func render<V: View>(_ view: V, scale: CGFloat) -> CGImage {
 func enlarge(_ image: CGImage, by factor: Int) -> CGImage {
     let width = image.width * factor
     let height = image.height * factor
-    let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
     context.interpolationQuality = .none
     context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
     return context.makeImage()!
@@ -48,9 +56,9 @@ func write(_ image: CGImage, _ name: String) {
 }
 
 /// A time at which every blinking lamp is lit (phase 0.1 s into each period).
-let litTime: TimeInterval = 1_000_000.1
-/// A time at which Q, Fl and Iso lamps are dark and Oc is eclipsed.
-let darkTime: TimeInterval = 1_000_000.0 + 2.7 // Q phase .7, Fl phase .7, Oc phase 2.7, Iso phase .7
+let litTime: TimeInterval = 0.1
+/// A time at which Q, Fl, Iso are dark and Oc is eclipsed.
+let darkTime: TimeInterval = 2.7  // Q phase .7, Fl phase .7, Oc phase 2.7, Iso phase .7
 
 // MARK: - Views
 
@@ -64,7 +72,9 @@ struct Cell: View {
 
     var body: some View {
         VStack(spacing: max(2, size * 0.08)) {
-            LighthouseFrame(state: state, size: size, time: time, reduceMotion: reduceMotion)
+            LighthouseFrame(
+                state: state, size: size, time: time, reduceMotion: reduceMotion,
+                sessionCount: sessionCount)
             if showLabel {
                 Text(size < 40 ? state.label : "\(state.label) · \(state.rawValue)")
                     .font(.system(size: max(7, size * 0.1), weight: .medium))
@@ -73,8 +83,11 @@ struct Cell: View {
                     .fixedSize()
             }
         }
-        .frame(width: showLabel ? max(size * LighthouseView.aspectRatio + size * 0.5, 64)
-                                : size * LighthouseView.aspectRatio + size * 0.5)
+        .frame(
+            width: showLabel
+                ? max(size * LighthouseView.aspectRatio + size * 0.5, 64)
+                : size * LighthouseView.aspectRatio + size * 0.5
+        )
         .padding(.vertical, size * 0.25)
     }
 }
@@ -95,8 +108,9 @@ struct ContactSheet: View {
     func row(_ background: Color, time: TimeInterval, reduceMotion: Bool) -> some View {
         HStack(spacing: 0) {
             ForEach(states, id: \.self) { state in
-                Cell(state: state, size: size, time: time, reduceMotion: reduceMotion,
-                     background: background, showLabel: labels)
+                Cell(
+                    state: state, size: size, time: time, reduceMotion: reduceMotion,
+                    background: background, showLabel: labels)
             }
         }
         .padding(.horizontal, size * 0.3)
@@ -114,14 +128,39 @@ struct LargeSheet: View {
             ForEach(0..<2) { row in
                 HStack(spacing: 0) {
                     ForEach(states[(row * 6)..<(row * 6 + 6)], id: \.self) { state in
-                        Cell(state: state, size: size, time: litTime, reduceMotion: true,
-                             background: background, showLabel: true)
+                        Cell(
+                            state: state, size: size, time: litTime, reduceMotion: true,
+                            background: background, showLabel: true)
                     }
                 }
             }
         }
         .padding(size * 0.15)
         .background(background)
+    }
+}
+
+/// The canvas-export layout: twelve size * 1.5 cells in a row on black.
+struct CompareSheet: View {
+    let size: CGFloat
+    let time: TimeInterval
+    let reduceMotion: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(states, id: \.self) { state in
+                ZStack(alignment: .topLeading) {
+                    Color.black
+                    LighthouseFrame(
+                        state: state, size: size, time: time, reduceMotion: reduceMotion,
+                        sessionCount: sessionCount
+                    )
+                    .offset(x: size / 4, y: size / 4)
+                }
+                .frame(width: size * 1.5, height: size * 1.5)
+                .clipped()
+            }
+        }
     }
 }
 
@@ -135,14 +174,14 @@ struct FrameStrip: View {
         HStack(spacing: size * 0.2) {
             ForEach(Array(times.enumerated()), id: \.offset) { _, t in
                 VStack(spacing: 2) {
-                    LighthouseFrame(state: state, size: size, time: litTime - 0.1 + t)
+                    LighthouseFrame(state: state, size: size, time: t, sessionCount: sessionCount)
                     Text(String(format: "%.2fs", t))
                         .font(.system(size: max(6, size * 0.1), design: .monospaced))
                         .foregroundStyle(Color(white: 0.7))
                 }
             }
         }
-        .padding(size * 0.2)
+        .padding(size * 0.3)
         .background(black)
     }
 }
@@ -172,20 +211,35 @@ MainActor.assumeIsolated {
         write(render(view, scale: 2), "state-120pt-\(state.rawValue).png")
     }
 
+    // Canvas-export layout at 22 pt and 120 pt, @2x: the still look (Reduce
+    // Motion, the canvas with animations off) and a few moments in time.
+    for size in [22.0, 120.0] as [CGFloat] {
+        let name = "compare-ours-\(Int(size))@2x"
+        write(render(CompareSheet(size: size, time: 0, reduceMotion: true), scale: 2), "\(name)-still.png")
+        for t in [0.2, 0.6, 1.3, 2.1, 2.7] {
+            write(
+                render(CompareSheet(size: size, time: t, reduceMotion: false), scale: 2),
+                "\(name)-t\(String(format: "%.1f", t)).png")
+        }
+    }
+
     // Animated states: frames across one period.
     let strips: [(LighthouseState, [TimeInterval])] = [
-        (.greeting, [0, 0.1, 0.2, 0.3, 0.5, 1.0, 1.2, 1.5]),
+        (.sleeping, [0, 0.4, 0.96, 1.6, 2.2]),
+        (.greeting, [0, 0.2, 0.4, 0.5, 0.8, 1.0, 1.2, 1.5]),
         (.thinking, [0, 0.5, 1.0, 1.5]),
-        (.working, [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]),
-        (.workingMany, [0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]),
-        (.needsApproval, [0, 0.2, 0.4, 0.7]),
-        (.error, [0, 0.4, 0.5, 1.0, 1.5]),
-        (.caution, [0, 1.0, 2.0, 2.5, 2.9]),
-        (.waitingInput, [0, 4.8, 4.9]),
+        (.working, [0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8]),
+        (.workingMany, [0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4]),
+        (.needsApproval, [0, 0.2, 0.45, 0.7]),
+        (.allowed, [0, 0.2, 0.4, 0.5, 0.8]),
+        (.error, [0, 0.0625, 0.1875, 0.4, 0.5, 1.0]),
+        (.caution, [0, 1.0, 2.0, 2.4, 2.9]),
+        (.waitingInput, [0, 0.9, 1.8, 2.7]),
     ]
     for (state, times) in strips {
         write(render(FrameStrip(state: state, size: 120, times: times), scale: 1), "frames-120pt-\(state.rawValue).png")
-        write(enlarge(render(FrameStrip(state: state, size: 22, times: times), scale: 2), by: 3),
-              "frames-22pt@2x-zoom3-\(state.rawValue).png")
+        write(
+            enlarge(render(FrameStrip(state: state, size: 22, times: times), scale: 2), by: 3),
+            "frames-22pt@2x-zoom3-\(state.rawValue).png")
     }
 }

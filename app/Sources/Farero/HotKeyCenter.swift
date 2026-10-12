@@ -40,6 +40,22 @@ final class HotKeyCenter {
         if registered.isEmpty { removeHandler() }
     }
 
+    /// Development aid (scripts/e2e-notch.py): sends `shortcut`'s hot-key
+    /// event to the app's event target, the event the system sends for the
+    /// key press, so it runs through the installed handler. Only a registered
+    /// shortcut is sent, as only those reach the app from the keyboard.
+    func sendDebugPress(_ shortcut: ApprovalShortcut) -> Bool {
+        guard registered[shortcut] != nil else { return false }
+        var event: EventRef?
+        guard CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), 0,
+                          EventAttributes(kEventAttributeNone), &event) == noErr, let event else { return false }
+        defer { ReleaseEvent(event) }
+        var hotKey = EventHotKeyID(signature: Self.signature, id: Self.id(shortcut))
+        guard SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                MemoryLayout<EventHotKeyID>.size, &hotKey) == noErr else { return false }
+        return SendEventToEventTarget(event, GetApplicationEventTarget()) == noErr
+    }
+
     private func installHandler() {
         guard handler == nil else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))

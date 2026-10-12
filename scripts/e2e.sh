@@ -36,7 +36,9 @@ trap cleanup EXIT
 
 "$BIN/farerod" --dev > "$E/farerod.log" 2>&1 &
 DAEMON_PID=$!
-for _ in $(seq 50); do [ -S "$E/d.sock" ] && break; sleep 0.1; done
+# The socket opens before the gateway (farerod reads the Keychain after it),
+# so wait for the gateway itself.
+for _ in $(seq 50); do grep -q "gateway listening" "$E/farerod.log" 2>/dev/null && break; sleep 0.1; done
 
 check() { # check <name> <condition result 0/1>
   if [ "$2" = 0 ]; then echo "  ok   $1"; else echo "  FAIL $1"; FAIL=1; fi
@@ -108,7 +110,9 @@ kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null; WATCH_PID=""
 
 echo "==> scenario with the app not running (scenario D)"
 sleep 0.5
-run_claude offline 'Use the farero MCP tools, strictly one tool call per message, then reply "done": (1) mcp__farero__dev_write_sim {"text":"offline"} (2) mcp__farero__dev_echo {"text":"still works"}. Report the exact result of each call.'
+# The auto tool goes first: after the refusal the model sometimes stops
+# without making the second call.
+run_claude offline 'Use the farero MCP tools, strictly one tool call per message, then reply "done": (1) mcp__farero__dev_echo {"text":"still works"} (2) mcp__farero__dev_write_sim {"text":"offline"}. Make both calls even if one fails. Report the exact result of each call.'
 calls > "$E/calls-offline.json"
 python3 - "$E" <<'PY'
 import json, sys
@@ -144,7 +148,8 @@ echo "==> two sessions in parallel calling the same tool with identical argument
 "$BIN/farero-devctl" watch -answer allow > "$E/watch-par.log" 2>&1 &
 WATCH_PID=$!
 sleep 0.5
-PAR='Call mcp__farero__dev_echo with exactly {"text":"same-args"} three times, one call per message, then reply "done".'
+# Spell out the count: the model sometimes stops after the first call.
+PAR='This is a load test, so repeated identical calls are intended. Call mcp__farero__dev_echo with exactly {"text":"same-args"} three times in total, one call per message (call 1, call 2, call 3). Do not reply with text until all three calls are done, then reply "done".'
 run_claude par1 "$PAR" &
 P1=$!
 run_claude par2 "$PAR" &

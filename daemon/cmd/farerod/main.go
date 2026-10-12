@@ -31,7 +31,7 @@ var version = "dev"
 // keychainService is the Keychain service name for farerod's items.
 const keychainService = "dev.farero.farerod"
 
-// launchAgentLabel is the LaunchAgent label (app/Resources/LaunchAgents).
+// launchAgentLabel is the LaunchAgent label (LaunchAgent.swift in the app).
 const launchAgentLabel = "dev.farero.farerod"
 
 func main() {
@@ -75,30 +75,23 @@ func run(log *slog.Logger, dev bool) error {
 	env := &plugins.Env{Store: st, Secrets: secrets, Log: log, Version: version, GitHubClientID: githubClientID}
 	services := plugins.Services(env)
 	c, err := core.New(ctx, core.Options{
-		Version:    version,
-		Store:      st,
-		Secrets:    secrets,
-		Table:      tab,
-		Log:        log,
-		Connectors: plugins.Connectors(services),
+		Version:         version,
+		Store:           st,
+		Secrets:         secrets,
+		Table:           tab,
+		Log:             log,
+		ApprovalTimeout: approvalTimeout(log, dev),
+		Connectors:      plugins.Connectors(services),
 	})
 	if err != nil {
 		return err
 	}
 	env.Core = c
-	if dev {
-		devPlugins(c)
-	}
-	plugins.RestoreAll(ctx, env, services)
-	c.RefreshTools(ctx)
-	if err := c.StartGateway(ctx); err != nil {
-		// Keep running: the app shows the error and hooks still work.
-		log.Error("gateway not started", "err", err)
-	} else {
-		log.Info("gateway listening", "url", c.GatewayInfo().URL)
-	}
-	registerAgentConfig(ctx, c, log, dev)
+	fixAgentPaths := registerAgentConfig(c, log, dev)
 
+	// Open the socket before anything reads the Keychain: with ad-hoc
+	// signing every update asks for Keychain access again, and until the
+	// user answers, the app and the hooks still reach farerod.
 	l, err := ipc.Listen(paths.Socket())
 	if err != nil {
 		return err
@@ -112,6 +105,21 @@ func run(log *slog.Logger, dev bool) error {
 			stop()
 		}
 	}()
+
+	// Keychain-backed startup: plugin tokens, then the gateway secret.
+	if dev {
+		devPlugins(c)
+	}
+	plugins.RestoreAll(ctx, env, services)
+	c.RefreshTools(ctx)
+	if err := c.StartGateway(ctx); err != nil {
+		// Keep running: the app shows the error and hooks still work.
+		log.Error("gateway not started", "err", err)
+	} else {
+		log.Info("gateway listening", "url", c.GatewayInfo().URL)
+	}
+	c.BroadcastSnapshot(ctx)
+	go fixAgentPaths(ctx)
 	<-ctx.Done()
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -145,6 +153,23 @@ func logOutput() io.Writer {
 		return os.Stderr
 	}
 	return f
+}
+
+// approvalTimeout is the approval deadline: 10 minutes (Q29), or
+// FARERO_APPROVAL_TIMEOUT (a Go duration) in --dev, so tests need not wait
+// that long.
+func approvalTimeout(log *slog.Logger, dev bool) time.Duration {
+	v := os.Getenv("FARERO_APPROVAL_TIMEOUT")
+	if !dev || v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Warn("ignoring FARERO_APPROVAL_TIMEOUT", "value", v)
+		return 0
+	}
+	log.Info("approval timeout", "timeout", d)
+	return d
 }
 
 func secretStore(dev bool) secret.Store {

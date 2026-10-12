@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,9 +53,22 @@ func (c *Conn) Read() (Message, error) {
 	return m, nil
 }
 
+// Marshal is json.Marshal without HTML escaping. Tool inputs cross the
+// socket on their way to the audit log and the app, and `&&` stored as
+// `\u0026\u0026` would not be found by a log search.
+func Marshal(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 // Write sends a message.
 func (c *Conn) Write(m Message) error {
-	b, err := json.Marshal(m)
+	b, err := Marshal(m)
 	if err != nil {
 		return err
 	}
@@ -69,7 +83,7 @@ func (c *Conn) Write(m Message) error {
 func (c *Conn) Send(typ, id string, data any) error {
 	m := Message{Type: typ, ID: id}
 	if data != nil {
-		b, err := json.Marshal(data)
+		b, err := Marshal(data)
 		if err != nil {
 			return err
 		}

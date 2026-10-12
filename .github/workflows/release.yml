@@ -26,18 +26,36 @@ jobs:
           cache-dependency-path: daemon/go.sum
       - name: Test daemon
         working-directory: daemon
-        run: go test ./...
-      - name: Test app
+        run: |
+          go vet ./...
+          go test -race ./...
+      - name: Character tests
+        run: swift test --package-path app/LighthouseKit
+      - name: App tests
         run: swift test --package-path app
       - name: Build Farero.app
         env:
           FARERO_GITHUB_CLIENT_ID: ${{ vars.FARERO_GITHUB_CLIENT_ID }}
           JOBS: "4"
         run: scripts/build.sh "${GITHUB_REF_NAME#v}"
+      - name: Checksum
+        working-directory: build
+        run: shasum -a 256 "Farero-${GITHUB_REF_NAME#v}.zip" > "Farero-${GITHUB_REF_NAME#v}.zip.sha256"
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" "build/Farero-$version.zip" \
-            --title "farero $version" --generate-notes
+          flags=()
+          beta_note=""
+          # A tag with a hyphen (v0.1.0-beta.1) is a prerelease.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            flags+=(--prerelease)
+            beta_note="> This is a beta. Expect rough edges, and please report problems as issues."
+          fi
+          sed -e "s/{{VERSION}}/$version/g" -e "s/{{BETA_NOTE}}/$beta_note/" \
+            .github/release-notes.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" \
+            "build/Farero-$version.zip" "build/Farero-$version.zip.sha256" \
+            --verify-tag --title "farero $version" \
+            --notes-file "$RUNNER_TEMP/notes.md" --generate-notes "${flags[@]}"

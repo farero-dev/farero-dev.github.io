@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +21,7 @@ import (
 	"github.com/farero-dev/farero/daemon/internal/policy"
 	"github.com/farero-dev/farero/daemon/internal/secret"
 	"github.com/farero-dev/farero/daemon/internal/store"
+	"github.com/farero-dev/farero/daemon/internal/upstream"
 	"github.com/farero-dev/farero/daemon/internal/upstream/devplugin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -31,16 +35,33 @@ type harness struct {
 
 func newHarness(t *testing.T, approvalTimeout time.Duration) *harness {
 	t.Helper()
+	return startHarness(t, memStore(t), devTable(), approvalTimeout, nil)
+}
+
+func memStore(t *testing.T) *store.Store {
+	t.Helper()
 	st, err := store.OpenMemory()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+// devTable is the shipped table plus the dev plugin's rules.
+func devTable() *policy.Table {
 	tab := policy.DefaultTable()
 	tab.AddPlugin(devplugin.Name, devplugin.Rules)
+	return tab
+}
+
+// startHarness runs a Core on st, like farerod starting on an existing
+// database. log may be nil.
+func startHarness(t *testing.T, st *store.Store, tab *policy.Table, approvalTimeout time.Duration, log *slog.Logger) *harness {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	c, err := New(ctx, Options{Version: "test", Store: st, Secrets: secret.NewMemoryStore(), Table: tab, ApprovalTimeout: approvalTimeout})
+	c, err := New(ctx, Options{Version: "test", Store: st, Secrets: secret.NewMemoryStore(), Table: tab, Log: log, ApprovalTimeout: approvalTimeout})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +133,25 @@ func (u *fakeUI) next(typ string) ipc.Message {
 			}
 		case <-timeout:
 			u.t.Fatalf("timed out waiting for %s", typ)
+		}
+	}
+}
+
+// reply waits for the reply to request id, whatever its type.
+func (u *fakeUI) reply(id string) ipc.Message {
+	u.t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case m, ok := <-u.msgs:
+			if !ok {
+				u.t.Fatalf("ui closed waiting for reply %s", id)
+			}
+			if m.ID == id {
+				return m
+			}
+		case <-timeout:
+			u.t.Fatalf("timed out waiting for reply %s", id)
 		}
 	}
 }
@@ -550,6 +590,101 @@ func TestPolicyOverrideChangesToolList(t *testing.T) {
 	}
 }
 
+// syncBuffer is a log destination safe for concurrent writers.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// An app update ships a new classification table; overrides set in the
+// settings screen stay in the DB and apply to it (6-5), except that an auto
+// override never lifts a tool the new table made no_session (Q33).
+func TestPolicyOverridesSurviveTableUpdate(t *testing.T) {
+	ctx := context.Background()
+	st := memStore(t)
+	h := startHarness(t, st, devTable(), time.Minute, nil)
+	u := h.ui()
+	for _, p := range []ipc.PolicySet{
+		{Plugin: "dev", Tool: "write_sim", Level: policy.LevelAuto},
+		{Plugin: "dev", Tool: "echo", Level: policy.LevelBlock},
+		{Plugin: "dev", Tool: "fail_sim", Level: policy.LevelAsk},
+	} {
+		u.conn.Send(ipc.TypePolicySet, "p-"+p.Tool, p)
+		if m := u.reply("p-" + p.Tool); m.Type != ipc.TypePolicyState {
+			t.Fatalf("policy.set %s: %s %s", p.Tool, m.Type, m.Data)
+		}
+	}
+	u.close()
+	h.core.Shutdown(ctx)
+
+	// farerod restarts with the new table.
+	rules := maps.Clone(devplugin.Rules)
+	rules["write_sim"] = policy.Rule{Level: policy.LevelAsk, NoSession: true}
+	rules["echo"] = policy.Rule{Level: policy.LevelAsk}
+	rules["fail_sim"] = policy.Rule{Level: policy.LevelAsk}
+	tab := policy.DefaultTable()
+	tab.AddPlugin(devplugin.Name, rules)
+	var logs syncBuffer
+	h = startHarness(t, st, tab, time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "dev_write_sim=auto") {
+		t.Errorf("no startup warning for the ignored override:\n%s", out)
+	}
+	u = h.ui()
+	u.conn.Send(ipc.TypePolicyGet, "g", nil)
+	tools, err := ipc.Decode[[]policy.ToolInfo](u.reply("g"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byTool := map[string]policy.ToolInfo{}
+	for _, ti := range tools {
+		if ti.Plugin == devplugin.Name {
+			byTool[ti.Tool] = ti
+		}
+	}
+	for tool, want := range map[string]struct {
+		level      string
+		overridden bool
+	}{
+		"echo":      {policy.LevelBlock, true}, // default changed, the user's level stays
+		"fail_sim":  {policy.LevelAsk, true},   // new default equals the user's level
+		"write_sim": {policy.LevelAsk, false},  // no_session now: auto ignored
+		"taint_sim": {policy.LevelAuto, false},
+	} {
+		if got := byTool[tool]; got.Level != want.level || got.Overridden != want.overridden {
+			t.Errorf("%s: %+v, want level %s overridden %v", tool, got, want.level, want.overridden)
+		}
+	}
+	names := h.core.gateway.ToolNames()
+	if slices.Contains(names, "dev_echo") || !slices.Contains(names, "dev_write_sim") || !slices.Contains(names, "dev_fail_sim") {
+		t.Errorf("tool list: %v", names)
+	}
+	// write_sim asks every time instead of running.
+	a := h.agent("s1", 100)
+	ch := a.callAsync("dev_write_sim", map[string]any{"text": "x"})
+	ap := u.approval()
+	if ap.Tool != "write_sim" || ap.AllowSession {
+		t.Fatalf("approval: %+v", ap)
+	}
+	u.answer(ap.ID, model.AnswerDeny)
+	<-ch
+	// The ignored row is kept for a later table without no_session.
+	if over, _ := st.PolicyOverrides(ctx); over["dev_write_sim"] != policy.LevelAuto || over["dev_echo"] != policy.LevelBlock {
+		t.Fatalf("stored overrides: %v", over)
+	}
+}
+
 type failingConnector struct{}
 
 func (failingConnector) Connect(context.Context, map[string]string, func(ipc.PluginPrompt)) error {
@@ -604,5 +739,124 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 	stored := h.lastCall()
 	if len(stored.Input) < 20000 {
 		t.Fatalf("stored input was trimmed: %d", len(stored.Input))
+	}
+}
+
+// blockingSecrets holds every read until release is closed, like a Keychain
+// prompt the user has not answered yet.
+type blockingSecrets struct {
+	secret.Store
+	release chan struct{}
+}
+
+func (b blockingSecrets) Get(key string) (string, error) {
+	<-b.release
+	return b.Store.Get(key)
+}
+
+// With ad-hoc signing every update makes the Keychain ask again, and the
+// user may answer late (M0 2026-10-06). The app must connect meanwhile, and
+// learn about the gateway once it starts.
+func TestUIConnectsBeforeKeychainAnswers(t *testing.T) {
+	st, err := store.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	secrets := blockingSecrets{Store: secret.NewMemoryStore(), release: make(chan struct{})}
+
+	created := make(chan *Core, 1)
+	go func() {
+		c, err := New(ctx, Options{Version: "test", Store: st, Secrets: secrets, Table: policy.DefaultTable()})
+		if err != nil {
+			t.Error(err)
+		}
+		created <- c
+	}()
+	var c *Core
+	select {
+	case c = <-created:
+	case <-time.After(2 * time.Second):
+		close(secrets.release)
+		t.Fatal("New waited for the Keychain")
+	}
+
+	dir, _ := os.MkdirTemp("/tmp", "frc")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
+	l, err := ipc.Listen(sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go ipc.Serve(ctx, l, c.Serve)
+	h := &harness{t: t, core: c, sock: sock, st: st}
+	u := h.ui()
+	if u.snap.Gateway.Running {
+		t.Fatalf("gateway running before its secret was read: %+v", u.snap.Gateway)
+	}
+
+	started := make(chan error, 1)
+	go func() { started <- c.StartGateway(ctx) }()
+	close(secrets.release)
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Shutdown(context.Background()) })
+	c.BroadcastSnapshot(ctx)
+	snap, _ := ipc.Decode[ipc.StateSnapshot](u.next(ipc.TypeStateSnapshot))
+	if !snap.Gateway.Running || snap.Gateway.URL == "" {
+		t.Fatalf("snapshot after start: %+v", snap.Gateway)
+	}
+}
+
+// farerod pushes the agent config status when it fixed paths on its own
+// (Q63), so the app can tell the user without opening settings.
+func TestNotifyReachesApps(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	h.core.Notify(ipc.TypeAgentCfgStatus, ipc.AgentCfgStatus{Agent: "claude", Message: "고쳤습니다"})
+	st, err := ipc.Decode[ipc.AgentCfgStatus](u.next(ipc.TypeAgentCfgStatus))
+	if err != nil || st.Message != "고쳤습니다" {
+		t.Fatalf("%+v %v", st, err)
+	}
+}
+
+// partialPlugin is the dev plugin with fail_sim missing from its tool list,
+// like an upstream that renamed or dropped a classified tool.
+type partialPlugin struct{ upstream.Plugin }
+
+func (p partialPlugin) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
+	all, err := p.Plugin.ListTools(ctx)
+	return slices.DeleteFunc(all, func(t *mcp.Tool) bool { return t.Name == "fail_sim" }), err
+}
+
+func TestPluginToolsReportsClassification(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	h.core.Plugins().Set(partialPlugin{devplugin.New()})
+	u := h.ui()
+	u.conn.Send(ipc.TypePluginTools, "t", ipc.PluginRef{Plugin: "dev"})
+	got, _ := ipc.Decode[ipc.PluginTools](u.next(ipc.TypePluginTools))
+	byName := map[string]ipc.PluginTool{}
+	for _, x := range got.Tools {
+		byName[x.Name] = x
+	}
+	if x := byName["unclassified_sim"]; x.Name == "" || x.Classified || x.Exposed {
+		t.Errorf("unclassified_sim: %+v", x)
+	}
+	if x := byName["blocked_sim"]; !x.Classified || x.Exposed || x.Level != policy.LevelBlock {
+		t.Errorf("blocked_sim: %+v", x)
+	}
+	if x := byName["write_sim"]; !x.Classified || !x.Exposed || x.Level != policy.LevelAsk {
+		t.Errorf("write_sim: %+v", x)
+	}
+	if !slices.Equal(got.Missing, []string{"fail_sim"}) {
+		t.Errorf("missing: %v", got.Missing)
+	}
+
+	u.conn.Send(ipc.TypePluginTools, "g", ipc.PluginRef{Plugin: "github"})
+	if m := u.next(ipc.TypeError); !strings.Contains(string(m.Data), "not connected") {
+		t.Fatalf("expected not connected, got %s", m.Data)
 	}
 }

@@ -8,13 +8,19 @@
 // lives for 30 seconds.
 //
 // When the same (tool, input) is pending for more than one session the match
-// is ambiguous. The connection's agent PID (reported by the headersHelper,
-// whose parent is the agent process, as is the hook's) is then used to pick
-// the right one; if that does not settle it the call is "unknown session".
+// is ambiguous. The connection's agent PID is then used to pick the right
+// one; if that does not settle it the call is "unknown session". The
+// headersHelper's parent is the agent process, as is the hook's, and the
+// connection id it gets carries that PID (NewConnID). Claude Code runs the
+// helper once per process and keeps the id for good, also across a farerod
+// restart (M4), so the PID is read from the id rather than remembered.
 package correlate
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,12 +36,11 @@ type entry struct {
 	at        time.Time
 }
 
-// Correlator holds pending PreToolUse entries and connection identities.
+// Correlator holds pending PreToolUse entries.
 type Correlator struct {
 	mu      sync.Mutex
 	now     func() time.Time
 	pending map[string][]entry // key -> entries in arrival order
-	connPID map[string]int     // X-Farero-Conn -> agent pid
 }
 
 // New returns an empty correlator.
@@ -43,8 +48,29 @@ func New() *Correlator {
 	return &Correlator{
 		now:     time.Now,
 		pending: map[string][]entry{},
-		connPID: map[string]int{},
 	}
+}
+
+// NewConnID makes a connection id (X-Farero-Conn) for an agent process:
+// "<pid>.<random>", or just random when the PID is unknown.
+func NewConnID(pid int, random string) string {
+	if pid <= 1 {
+		return random
+	}
+	return fmt.Sprintf("%d.%s", pid, random)
+}
+
+// connPID is the agent PID carried by a connection id, or 0.
+func connPID(conn string) int {
+	p, _, ok := strings.Cut(conn, ".")
+	if !ok {
+		return 0
+	}
+	pid, err := strconv.Atoi(p)
+	if err != nil || pid <= 1 {
+		return 0
+	}
+	return pid
 }
 
 // Key builds the match key for an exposed gateway tool name and its input.
@@ -59,16 +85,6 @@ func (c *Correlator) Expect(sessionID string, pid int, tool string, input json.R
 	defer c.mu.Unlock()
 	k := Key(tool, input)
 	c.pending[k] = append(c.prune(c.pending[k]), entry{sessionID: sessionID, pid: pid, at: c.now()})
-}
-
-// SetConnPID remembers which agent process a gateway connection belongs to.
-func (c *Correlator) SetConnPID(conn string, pid int) {
-	if conn == "" || pid <= 0 {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.connPID[conn] = pid
 }
 
 // Match result methods.
@@ -98,7 +114,7 @@ func (c *Correlator) Match(conn, tool string, input json.RawMessage) (sessionID,
 	method = ByHook
 	if len(sessions) == 1 {
 		pick = 0
-	} else if pid, ok := c.connPID[conn]; ok {
+	} else if pid := connPID(conn); pid > 0 {
 		// Prefer an entry recorded by the same agent process.
 		for i, e := range list {
 			if e.pid == pid {
@@ -119,17 +135,6 @@ func (c *Correlator) Match(conn, tool string, input json.RawMessage) (sessionID,
 		c.pending[k] = list
 	}
 	return sessionID, method
-}
-
-// Forget drops the connections of an agent process that has exited.
-func (c *Correlator) Forget(pid int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for conn, p := range c.connPID {
-		if p == pid {
-			delete(c.connPID, conn)
-		}
-	}
 }
 
 func (c *Correlator) prune(list []entry) []entry {

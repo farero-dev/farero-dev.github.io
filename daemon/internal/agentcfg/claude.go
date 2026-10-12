@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,9 +41,10 @@ const HookTimeout = 660
 const ServerTimeoutMS = 660000
 
 // hookEvents are the Claude Code events farero listens to (기능 명세서 F-02).
+// StopFailure (v2.1.78) ends a turn on an API error instead of Stop.
 var hookEvents = []string{
 	"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-	"PermissionRequest", "Notification", "Stop", "SessionEnd",
+	"PermissionRequest", "Notification", "Stop", "StopFailure", "SessionEnd",
 }
 
 // toolEvents take a matcher.
@@ -62,6 +64,9 @@ type Claude struct {
 	CLI string
 	// Run executes a command (tests replace it).
 	Run func(ctx context.Context, name string, args ...string) ([]byte, error)
+
+	opMu   sync.Mutex // one Apply, Remove or FixPath at a time
+	fileMu sync.Mutex // one settings.json write at a time
 
 	mu      sync.Mutex
 	notice  string
@@ -186,7 +191,7 @@ func (c *Claude) Status(ctx context.Context) ipc.AgentCfgStatus {
 	}
 	settings, err := c.readSettings()
 	if err == nil {
-		st.HooksInstalled, st.StalePath = c.hooksState(settings)
+		st.HooksInstalled, _, st.StalePath = c.hooksState(settings)
 		st.AllowInstalled = hasAllow(settings)
 	}
 	if srv, ok := c.installedServer(); ok {
@@ -241,10 +246,13 @@ type hookEntry struct {
 	} `json:"hooks"`
 }
 
-func (c *Claude) hooksState(settings *object) (installed, stale bool) {
+// hooksState reports whether every event has farero's hook (installed),
+// whether any has (present), and whether one of them runs another
+// farero-hook path (stale).
+func (c *Claude) hooksState(settings *object) (installed, present, stale bool) {
 	hooks, err := settings.child("hooks")
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	installed = true
 	for _, ev := range hookEvents {
@@ -263,6 +271,7 @@ func (c *Claude) hooksState(settings *object) (installed, stale bool) {
 			for _, h := range e.Hooks {
 				if strings.Contains(h.Command, hookMarker) {
 					found = true
+					present = true
 					if h.Command != c.hookCommand() {
 						stale = true
 					}
@@ -273,7 +282,7 @@ func (c *Claude) hooksState(settings *object) (installed, stale bool) {
 			installed = false
 		}
 	}
-	return installed, stale
+	return installed, present, stale
 }
 
 func hasAllow(settings *object) bool {
@@ -295,10 +304,19 @@ func hasAllow(settings *object) bool {
 	return false
 }
 
-// rewriteHooks removes farero's hook commands from every event and, when
-// add is true, appends farero's entry. Entries of other tools are kept
+// writeMode is what a rewrite of settings.json does with farero's entries.
+type writeMode int
+
+const (
+	modeRemove   writeMode = iota
+	modeInstall            // every event in hookEvents, and the allow rule
+	modeFixPaths           // the current path where farero's hooks already are; nothing added (Q63)
+)
+
+// rewriteHooks removes farero's hook commands from every event and appends
+// farero's entry again as mode says. Entries of other tools are kept
 // byte-for-byte.
-func (c *Claude) rewriteHooks(settings *object, add bool) error {
+func (c *Claude) rewriteHooks(settings *object, mode writeMode) error {
 	hooks, err := settings.child("hooks")
 	if err != nil {
 		return fmt.Errorf("settings.hooks: %w", err)
@@ -317,7 +335,9 @@ func (c *Claude) rewriteHooks(settings *object, add bool) error {
 			}
 		}
 		var kept []json.RawMessage
+		had := false
 		for _, raw := range entries {
+			had = had || bytes.Contains(raw, []byte(hookMarker))
 			cleaned, keep, err := stripFarero(raw)
 			if err != nil {
 				return fmt.Errorf("settings.hooks.%s: %w", ev, err)
@@ -326,7 +346,7 @@ func (c *Claude) rewriteHooks(settings *object, add bool) error {
 				kept = append(kept, cleaned)
 			}
 		}
-		if add && contains(hookEvents, ev) {
+		if (mode == modeInstall && contains(hookEvents, ev)) || (mode == modeFixPaths && had) {
 			entry := map[string]any{"hooks": []map[string]any{{
 				"type": "command", "command": c.hookCommand(), "timeout": HookTimeout,
 			}}}
@@ -420,7 +440,7 @@ func setAllow(settings *object, add bool) error {
 }
 
 // render returns the current and the planned settings file contents.
-func (c *Claude) render(install bool) (before, after string, err error) {
+func (c *Claude) render(mode writeMode) (before, after string, err error) {
 	b, err := os.ReadFile(c.settingsPath())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", "", err
@@ -429,11 +449,13 @@ func (c *Claude) render(install bool) (before, after string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("%s is not valid JSON: %w", c.settingsPath(), err)
 	}
-	if err := c.rewriteHooks(settings, install); err != nil {
+	if err := c.rewriteHooks(settings, mode); err != nil {
 		return "", "", err
 	}
-	if err := setAllow(settings, install); err != nil {
-		return "", "", err
+	if mode != modeFixPaths {
+		if err := setAllow(settings, mode == modeInstall); err != nil {
+			return "", "", err
+		}
 	}
 	out, err := pretty(settings)
 	if err != nil {
@@ -442,13 +464,34 @@ func (c *Claude) render(install bool) (before, after string, err error) {
 	return string(b), string(out), nil
 }
 
+// checkVersion refuses a Claude Code older than MinClaudeVersion (Q53).
+// Before v2.1.101 Claude Code ignores the whole settings.json when a hook
+// event is unknown to it, so writing farero's hooks could switch off the
+// user's own settings. An unreadable version is let through.
+func (c *Claude) checkVersion(ctx context.Context, cli string) error {
+	out, err := c.run(ctx, cli, "--version")
+	if err != nil {
+		return nil
+	}
+	v := parseVersion(string(out))
+	if v == "" || versionAtLeast(v, MinClaudeVersion) {
+		return nil
+	}
+	return fmt.Errorf("Claude Code %s는 지원하지 않는 버전입니다. %s 이상으로 업데이트한 뒤 등록하세요 (claude update)", v, MinClaudeVersion)
+}
+
 // Plan describes what Apply would change.
 func (c *Claude) Plan(ctx context.Context) (ipc.AgentCfgPlan, error) {
-	before, after, err := c.render(true)
+	cli := c.findCLI(ctx)
+	if cli != "" {
+		if err := c.checkVersion(ctx, cli); err != nil {
+			return ipc.AgentCfgPlan{}, err
+		}
+	}
+	before, after, err := c.render(modeInstall)
 	if err != nil {
 		return ipc.AgentCfgPlan{}, err
 	}
-	cli := c.findCLI(ctx)
 	if cli == "" {
 		cli = "claude"
 	}
@@ -464,11 +507,16 @@ func (c *Claude) Plan(ctx context.Context) (ipc.AgentCfgPlan, error) {
 
 // Apply installs farero after backing up settings.json.
 func (c *Claude) Apply(ctx context.Context) (ipc.AgentCfgStatus, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
 	cli := c.findCLI(ctx)
 	if cli == "" {
 		return ipc.AgentCfgStatus{}, errors.New("Claude Code(claude) 실행 파일을 찾을 수 없음")
 	}
-	backup, err := c.writeSettings(true)
+	if err := c.checkVersion(ctx, cli); err != nil {
+		return ipc.AgentCfgStatus{}, err
+	}
+	backup, err := c.writeSettings(modeInstall)
 	if err != nil {
 		return ipc.AgentCfgStatus{}, err
 	}
@@ -491,7 +539,9 @@ func (c *Claude) Apply(ctx context.Context) (ipc.AgentCfgStatus, error) {
 
 // Remove deletes only what farero added.
 func (c *Claude) Remove(ctx context.Context) (ipc.AgentCfgStatus, error) {
-	backup, err := c.writeSettings(false)
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+	backup, err := c.writeSettings(modeRemove)
 	if err != nil {
 		return ipc.AgentCfgStatus{}, err
 	}
@@ -508,39 +558,77 @@ func (c *Claude) Remove(ctx context.Context) (ipc.AgentCfgStatus, error) {
 // leaves a notice for the app. It does nothing unless farero is installed
 // with a stale path.
 func (c *Claude) FixPath(ctx context.Context) (bool, error) {
-	st := c.Status(ctx)
-	if !st.StalePath || !(st.HooksInstalled || st.MCPInstalled) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+	hooksStale := false
+	if settings, err := c.readSettings(); err == nil {
+		_, present, stale := c.hooksState(settings)
+		hooksStale = present && stale
+	}
+	srv, ok := c.installedServer()
+	mcpStale := ok && (srv.URL != c.GatewayURL() || srv.HeadersHelper != c.headersCommand() || srv.Timeout != ServerTimeoutMS)
+	cli := ""
+	if mcpStale {
+		cli = c.findCLI(ctx) // without it the entry cannot be fixed
+	}
+	if !hooksStale && cli == "" {
 		return false, nil
 	}
-	if st.HooksInstalled {
-		if _, err := c.writeSettings(true); err != nil {
+	backup := ""
+	if hooksStale {
+		var err error
+		if backup, err = c.writeSettings(modeFixPaths); err != nil {
 			return false, err
 		}
 	}
-	if st.MCPInstalled && st.CLIFound {
-		c.run(ctx, st.CLIPath, "mcp", "remove", ServerName, "--scope", "user")
-		if out, err := c.run(ctx, st.CLIPath, "mcp", "add-json", ServerName, c.serverJSON(), "--scope", "user"); err != nil {
+	if cli != "" {
+		c.run(ctx, cli, "mcp", "remove", ServerName, "--scope", "user")
+		if out, err := c.run(ctx, cli, "mcp", "add-json", ServerName, c.serverJSON(), "--scope", "user"); err != nil {
 			return false, fmt.Errorf("claude mcp add-json: %v: %s", err, strings.TrimSpace(string(out)))
 		}
 	}
 	c.mu.Lock()
 	c.notice = "farero 앱 위치가 바뀌어 Claude Code 설정의 경로를 새 위치로 고쳤습니다: " + c.HookPath
+	if backup != "" {
+		c.notice += " (이전 settings.json 백업: " + backup + ")"
+	}
 	c.mu.Unlock()
 	return true, nil
 }
 
 // writeSettings backs up and rewrites settings.json. It returns the backup
 // path ("" when there was no file).
-func (c *Claude) writeSettings(install bool) (string, error) {
-	before, after, err := c.render(install)
+//
+// The first install also keeps settings.json as it was (see original). When
+// removing leaves the same JSON as that original, the original bytes are
+// written back, or the file is deleted if farero created it, so "설정 제거"
+// returns the file exactly to how it was.
+func (c *Claude) writeSettings(mode writeMode) (string, error) {
+	c.fileMu.Lock()
+	defer c.fileMu.Unlock()
+	before, after, err := c.render(mode)
 	if err != nil {
 		return "", err
 	}
 	path := c.settingsPath()
+	fi, statErr := os.Stat(path)
+	existed := statErr == nil
+	del := false
+	if mode == modeInstall {
+		if err := c.rememberOriginal(existed, before); err != nil {
+			return "", err
+		}
+	} else if o, ok := c.loadOriginal(); ok && mode == modeRemove && sameJSON(after, o.Content) {
+		if o.Existed {
+			after = o.Content
+		} else {
+			del = true
+		}
+	}
 	backup := ""
-	mode := os.FileMode(0o644)
-	if fi, err := os.Stat(path); err == nil {
-		mode = fi.Mode().Perm()
+	perm := os.FileMode(0o644)
+	if existed {
+		perm = fi.Mode().Perm()
 		if err := os.MkdirAll(c.BackupDir, 0o700); err != nil {
 			return "", err
 		}
@@ -549,14 +637,108 @@ func (c *Claude) writeSettings(install bool) (string, error) {
 			return "", err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", err
+	if del {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	} else {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return "", err
+		}
+		if err := writeAtomic(path, []byte(after), perm); err != nil {
+			return "", err
+		}
 	}
-	tmp := path + ".farero-tmp"
-	if err := os.WriteFile(tmp, []byte(after), mode); err != nil {
-		return "", err
+	if mode == modeRemove {
+		// The next install records whatever the file is then.
+		os.Remove(c.originalPath())
 	}
-	return backup, os.Rename(tmp, path)
+	return backup, nil
+}
+
+// writeAtomic replaces path with data through a temporary file in the same
+// directory, so Claude Code never reads a half-written settings.json.
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".settings.json.farero-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(tmp, perm)
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
+}
+
+// original is settings.json as it was before farero first installed into it.
+type original struct {
+	Existed bool   `json:"existed"`
+	Content string `json:"content"`
+}
+
+func (c *Claude) originalPath() string {
+	return filepath.Join(c.BackupDir, "claude-settings-original.json")
+}
+
+// rememberOriginal saves the file before the first install. A file that
+// already has farero entries (installed before this was kept) is not an
+// original, and a saved original is never replaced by a reinstall.
+func (c *Claude) rememberOriginal(existed bool, content string) error {
+	if _, err := os.Stat(c.originalPath()); err == nil {
+		return nil
+	}
+	settings, err := parseObject([]byte(content))
+	if err != nil {
+		return err
+	}
+	if _, present, _ := c.hooksState(settings); present || hasAllow(settings) || strings.Contains(content, hookMarker) {
+		return nil
+	}
+	b, err := json.Marshal(original{Existed: existed, Content: content})
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(c.BackupDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(c.originalPath(), b, 0o600)
+}
+
+func (c *Claude) loadOriginal() (original, bool) {
+	b, err := os.ReadFile(c.originalPath())
+	if err != nil {
+		return original{}, false
+	}
+	var o original
+	if json.Unmarshal(b, &o) != nil {
+		return original{}, false
+	}
+	return o, true
+}
+
+// sameJSON compares two JSON documents ignoring key order and formatting.
+// An empty document counts as {}.
+func sameJSON(a, b string) bool {
+	parse := func(s string) (any, bool) {
+		if strings.TrimSpace(s) == "" {
+			return map[string]any{}, true
+		}
+		var v any
+		return v, json.Unmarshal([]byte(s), &v) == nil
+	}
+	x, ok1 := parse(a)
+	y, ok2 := parse(b)
+	return ok1 && ok2 && reflect.DeepEqual(x, y)
 }
 
 func contains(list []string, s string) bool {

@@ -19,6 +19,7 @@ func SupportDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		// Fall back to /tmp when the home directory cannot be resolved.
 		home = "/tmp"
 	}
 	return filepath.Join(home, "Library", "Application Support", "Farero")

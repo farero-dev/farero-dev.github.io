@@ -60,10 +60,15 @@ public struct LogFilter: Sendable, Equatable {
     /// How farerod will match the text (Q64): three or more characters use
     /// the trigram index, shorter ones (Korean words are often two
     /// syllables) a substring match.
+    ///
+    /// farerod counts code points (Go runes) after `strings.TrimSpace`, so
+    /// this counts Unicode scalars, not grapheme clusters: a decomposed
+    /// "배포" (U+1107 U+1162 U+1111 U+1169) is four, "👍🏽" two. Both trim
+    /// the same set (Unicode White_Space).
     public static func searchModeLabel(_ query: String) -> String? {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return nil }
-        return q.count >= 3 ? "전문 검색" : "부분 일치"
+        return q.unicodeScalars.count >= 3 ? "전문 검색" : "부분 일치"
     }
 
     /// Decisions offered in the filter, in display order.
@@ -111,6 +116,7 @@ public enum CallPresentation {
             case "agent_request": "에이전트 권한 요청"
             case "allow_session": "이번 세션 동안 허용"
             case "app_not_running": "앱이 실행 중이 아님"
+            case "answered_in_agent": "터미널(또는 다른 훅)에서 먼저 답함"
             case "unclassified": "분류표에 없는 도구"
             default: String(code)
             }
@@ -200,8 +206,9 @@ public enum PluginPresentation {
         }
     }
 
-    /// How the plugin signs in.
+    /// How the plugin signs in. Railway refuses the device flow for
+    /// dynamically registered clients, so only GitHub uses a device code.
     public static func usesDeviceCode(_ plugin: String) -> Bool {
-        plugin == "github" || plugin == "railway"
+        plugin == "github"
     }
 }

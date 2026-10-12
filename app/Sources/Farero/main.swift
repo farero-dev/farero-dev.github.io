@@ -20,10 +20,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.start()
 
         // Register farerod as a LaunchAgent (skipped in development runs).
-        model.registrar.registerIfNeeded()
+        model.registrar.registerIfNeeded { [model] in
+            model.registrationLabel = model.registrar.status.label
+        }
         model.registrationLabel = model.registrar.status.label
         windows.showOnboardingIfFirstLaunch()
         windows.openDebugWindows()
+    }
+
+    /// The notch and its cards never take focus (기능 명세서 5-3); only the
+    /// menu's windows activate the app. scripts/e2e-notch.py reads this line.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        model.debugLog("app became active")
     }
 
     func applicationWillTerminate(_ notification: Notification) {

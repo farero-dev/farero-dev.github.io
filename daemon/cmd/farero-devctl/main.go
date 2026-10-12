@@ -3,9 +3,13 @@
 // cards automatically. It is not shipped in the app bundle.
 //
 //	farero-devctl watch [-answer allow|allow_session|deny]
+//	farero-devctl answer <approval id> allow|allow_session|deny
 //	farero-devctl log [-q text] [-n 20]
-//	farero-devctl policy
+//	farero-devctl policy [set <plugin> <tool> [auto|ask|block]]  (no level: back to the default)
 //	farero-devctl agentcfg status|plan|apply|remove
+//	farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]
+//	farero-devctl settings [limit <bytes> | update on|off]
+//	farero-devctl session delete <session id>
 package main
 
 import (
@@ -13,6 +17,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
@@ -23,7 +30,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|log|policy")
+		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg|plugin|settings|session")
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -61,6 +68,13 @@ func main() {
 				conn.Send(ipc.TypeApprovalResponse, "auto", ipc.ApprovalResponse{ApprovalID: a.ID, Answer: ans})
 			}
 		}
+	case "answer":
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "usage: farero-devctl answer <approval id> allow|allow_session|deny")
+			os.Exit(2)
+		}
+		conn.Send(ipc.TypeApprovalResponse, "r", ipc.ApprovalResponse{ApprovalID: args[0], Answer: args[1]})
+		printReply(conn, "r")
 	case "log":
 		fs := flag.NewFlagSet("log", flag.ExitOnError)
 		q := fs.String("q", "", "search text")
@@ -69,7 +83,20 @@ func main() {
 		conn.Send(ipc.TypeLogQuery, "q", store.CallFilter{Query: *q, Limit: *n})
 		printReply(conn, "q")
 	case "policy":
-		conn.Send(ipc.TypePolicyGet, "p", nil)
+		if len(args) == 0 {
+			conn.Send(ipc.TypePolicyGet, "p", nil)
+			printReply(conn, "p")
+			break
+		}
+		if args[0] != "set" || len(args) < 3 || len(args) > 4 {
+			fmt.Fprintln(os.Stderr, "usage: farero-devctl policy [set <plugin> <tool> [auto|ask|block]]")
+			os.Exit(2)
+		}
+		level := ""
+		if len(args) == 4 {
+			level = args[3]
+		}
+		conn.Send(ipc.TypePolicySet, "p", ipc.PolicySet{Plugin: args[1], Tool: args[2], Level: level})
 		printReply(conn, "p")
 	case "agentcfg":
 		op := "status"
@@ -78,9 +105,145 @@ func main() {
 		}
 		conn.Send("agentcfg."+op, "a", ipc.AgentRef{Agent: "claude"})
 		printReply(conn, "a")
+	case "plugin":
+		pluginCmd(conn, args)
+	case "settings":
+		settingsCmd(conn, args)
+	case "session":
+		if len(args) != 2 || args[0] != "delete" {
+			fmt.Fprintln(os.Stderr, "usage: farero-devctl session delete <session id>")
+			os.Exit(2)
+		}
+		conn.Send(ipc.TypeSessionDelete, "s", ipc.SessionRef{SessionID: args[1]})
+		printReply(conn, "s")
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command", cmd)
 		os.Exit(2)
+	}
+}
+
+const settingsUsage = "usage: farero-devctl settings [limit <bytes> | update on|off]"
+
+// settingsCmd prints the settings, or changes one of them (settings.set
+// leaves the other as it is).
+func settingsCmd(conn *ipc.Conn, args []string) {
+	if len(args) == 0 {
+		conn.Send(ipc.TypeSettingsGet, "g", nil)
+		printReply(conn, "g")
+		return
+	}
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, settingsUsage)
+		os.Exit(2)
+	}
+	var req ipc.SettingsSet
+	switch args[0] {
+	case "limit":
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, settingsUsage)
+			os.Exit(2)
+		}
+		req.ResultLimitBytes = &n
+	case "update":
+		on := args[1] == "on"
+		if !on && args[1] != "off" {
+			fmt.Fprintln(os.Stderr, settingsUsage)
+			os.Exit(2)
+		}
+		req.UpdateCheck = &on
+	default:
+		fmt.Fprintln(os.Stderr, settingsUsage)
+		os.Exit(2)
+	}
+	conn.Send(ipc.TypeSettingsSet, "s", req)
+	printReply(conn, "s")
+}
+
+const pluginUsage = "usage: farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]"
+
+func pluginCmd(conn *ipc.Conn, args []string) {
+	if len(args) == 0 {
+		conn.Send(ipc.TypePluginList, "l", nil)
+		printReply(conn, "l")
+		return
+	}
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, pluginUsage)
+		os.Exit(2)
+	}
+	op, name := args[0], args[1]
+	switch op {
+	case "connect":
+		params := map[string]string{}
+		for _, kv := range args[2:] {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				fmt.Fprintln(os.Stderr, pluginUsage)
+				os.Exit(2)
+			}
+			params[k] = v
+		}
+		conn.Send(ipc.TypePluginConnect, "c", ipc.PluginConnect{Plugin: name, Params: params})
+		os.Exit(waitConnect(conn, name))
+	case "disconnect":
+		conn.Send(ipc.TypePluginDisconnect, "d", ipc.PluginRef{Plugin: name})
+		printReply(conn, "d")
+	case "option":
+		if len(args) != 4 {
+			fmt.Fprintln(os.Stderr, pluginUsage)
+			os.Exit(2)
+		}
+		conn.Send(ipc.TypePluginSetOption, "o", ipc.PluginSetOption{Plugin: name, Key: args[2], Value: args[3]})
+		printReply(conn, "o")
+	case "tools":
+		conn.Send(ipc.TypePluginTools, "t", ipc.PluginRef{Plugin: name})
+		printReply(conn, "t")
+	default:
+		fmt.Fprintln(os.Stderr, pluginUsage)
+		os.Exit(2)
+	}
+}
+
+// waitConnect follows a plugin.connect like the app's plugin window: it
+// prints the device code or authorization URL, opens the URL in the
+// browser, and returns once the plugin is connected (0) or failed (1).
+func waitConnect(conn *ipc.Conn, plugin string) int {
+	for {
+		m, err := conn.Read()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		switch m.Type {
+		case ipc.TypeError:
+			if m.ID == "c" {
+				fmt.Fprintln(os.Stderr, string(m.Data))
+				return 1
+			}
+		case ipc.TypePluginPrompt:
+			p, _ := ipc.Decode[ipc.PluginPrompt](m)
+			if p.Plugin != plugin {
+				continue
+			}
+			if p.UserCode != "" {
+				fmt.Println("code:", p.UserCode)
+			}
+			fmt.Println("open:", p.URL)
+			exec.Command("open", p.URL).Run()
+		case ipc.TypePluginUpdated:
+			p, _ := ipc.Decode[model.PluginState](m)
+			if p.Plugin != plugin {
+				continue
+			}
+			fmt.Println(line(m))
+			switch p.Status {
+			case model.PluginConnected:
+				return 0
+			case model.PluginError, model.PluginExpired, model.PluginDisconnected:
+				return 1
+			}
+		}
 	}
 }
 

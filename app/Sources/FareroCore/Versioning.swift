@@ -99,15 +99,20 @@ public enum UpdateCheck {
         public var url: URL
     }
 
-    /// Whether this build takes part: a real version, not a dev build or an
-    /// unfilled Info.plist template.
-    public static func isCheckable(currentVersion: String?) -> Bool {
-        guard let v = currentVersion, !v.isEmpty, v != "dev", !v.contains("__") else { return false }
-        return SemVer(v) != nil
+    /// Whether this build takes part: a real version, not a dev build
+    /// ("dev", 0.0.0 and its variants such as the e2e scripts' "0.0.0-e2e")
+    /// or an unfilled Info.plist template, and not a development run
+    /// (`FARERO_SOCKET` set, as the e2e scripts run build/Farero.app).
+    public static func isCheckable(currentVersion: String?, environment: [String: String] = [:]) -> Bool {
+        if let s = environment["FARERO_SOCKET"], !s.isEmpty { return false }
+        guard let v = currentVersion, !v.isEmpty, v != "dev", !v.contains("__"), let semver = SemVer(v) else { return false }
+        return (semver.major, semver.minor, semver.patch) != (0, 0, 0)
     }
 
     /// The newer release, or nil when the current version is up to date,
-    /// not checkable, or the release is a draft or prerelease.
+    /// not checkable, or the release is a draft or prerelease. SemVer ranks
+    /// a release above its prereleases (semver.org 11), so a 0.1.0-beta.1
+    /// build is told about 0.1.0 and a 0.1.0 build never about a beta.
     public static func newer(release: Release, currentVersion: String?) -> Available? {
         guard isCheckable(currentVersion: currentVersion), let current = currentVersion.flatMap(SemVer.init),
               !release.draft, !release.prerelease,
@@ -149,5 +154,28 @@ public enum DaemonVersionCheck {
     static func normalize(_ v: String) -> String {
         if let s = SemVer(v) { return s.description }
         return v.hasPrefix("v") ? String(v.dropFirst()) : v
+    }
+}
+
+/// Whether the LaunchAgent must be registered again because the farerod it
+/// runs is not the one this bundle ships. With ad-hoc signing (Q47) the
+/// background item is tied to the executable's code hash: replacing the app
+/// bundle (an update or a rebuild) invalidates it, and launchd then fails to
+/// start farerod ("needs LWCR update", EX_CONFIG; M0 2026-10-06). The daemon
+/// never comes up to report its version, so DaemonVersionCheck cannot catch
+/// this.
+public enum DaemonRegistrationCheck {
+    /// The registered farerod: its path (moving the app changes it) and its
+    /// code directory hash.
+    public static func identity(executablePath: String, cdhash: Data) -> String {
+        executablePath + "#" + cdhash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// A missing record means a build that did not record it registered the
+    /// agent, so it is registered once more. An unreadable signature
+    /// (`current` nil) keeps the registration as it is.
+    public static func needsReregistration(recorded: String?, current: String?) -> Bool {
+        guard let current else { return false }
+        return recorded != current
     }
 }

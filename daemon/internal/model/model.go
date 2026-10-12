@@ -69,6 +69,9 @@ const (
 	ReasonAppNotRunning  = "app_not_running"
 	ReasonUnclassified   = "unclassified"
 	ReasonAgentRequest   = "agent_request" // the agent asked for its own tool
+	// ReasonAnsweredInAgent: the agent went on before farero's answer (the
+	// user answered in the terminal, or another hook did).
+	ReasonAnsweredInAgent = "answered_in_agent"
 )
 
 // Call is one audit log row.

@@ -2,12 +2,13 @@ import FareroCore
 import SwiftUI
 
 /// Claude Code registration (기능 명세서 F-06): status, the plan with a
-/// before/after diff, apply and remove.
+/// before/after diff, apply and remove. The status lives in `AppState`, so
+/// the menu and every panel show the same one, including farerod's push
+/// after it fixed paths.
 @MainActor
 @Observable
 final class AgentCfgModel {
     private let app: AppModel
-    private(set) var status: AgentCfgStatus?
     private(set) var plan: AgentCfgPlan?
     private(set) var busy = false
     private(set) var error: String?
@@ -19,14 +20,29 @@ final class AgentCfgModel {
         self.app = app
     }
 
+    var status: AgentCfgStatus? { app.state.agentCfg }
+
+    /// The panel is on screen, showing farerod's notice if there is one.
+    func markNoticeSeen() {
+        app.dispatch(.agentCfgNoticeSeen)
+    }
+
     func refresh() async {
         await run {
             let reply = try await self.app.client.request(MessageType.agentCfgStatus, AgentRef())
-            if case .agentCfgStatus(let s) = reply.payload { self.status = s }
+            self.app.receiveAgentCfgReply(reply)
         }
     }
 
+    /// A translocated app must not register: farerod would record the hook
+    /// path of a copy that is gone on the next launch (Q63 cannot fix that).
+    var registrationBlocked: Bool { DaemonRegistrar.isTranslocated }
+
     func preparePlan() async {
+        guard !registrationBlocked else {
+            error = DaemonRegistrar.translocatedMessage
+            return
+        }
         await run {
             let reply = try await self.app.client.request(MessageType.agentCfgPlan, AgentRef())
             if case .agentCfgPlan(let p) = reply.payload {
@@ -37,11 +53,16 @@ final class AgentCfgModel {
     }
 
     func apply() async {
+        guard !registrationBlocked else {
+            error = DaemonRegistrar.translocatedMessage
+            showingPlan = false
+            return
+        }
         await run {
             // Running the claude CLI can take a while.
             let reply = try await self.app.client.request(MessageType.agentCfgApply, AgentRef(), timeout: .seconds(90))
+            self.app.receiveAgentCfgReply(reply)
             if case .agentCfgStatus(let s) = reply.payload {
-                self.status = s
                 self.result = s.backupPath.isEmpty
                     ? "등록했습니다. Claude Code를 다시 시작하면 적용됩니다."
                     : "등록했습니다. 이전 설정은 \(s.backupPath)에 백업했습니다. Claude Code를 다시 시작하면 적용됩니다."
@@ -53,8 +74,8 @@ final class AgentCfgModel {
     func remove() async {
         await run {
             let reply = try await self.app.client.request(MessageType.agentCfgRemove, AgentRef(), timeout: .seconds(90))
+            self.app.receiveAgentCfgReply(reply)
             if case .agentCfgStatus(let s) = reply.payload {
-                self.status = s
                 self.result = s.backupPath.isEmpty
                     ? "farero 설정을 제거했습니다."
                     : "farero 설정을 제거했습니다. 이전 설정은 \(s.backupPath)에 백업했습니다."
@@ -85,6 +106,9 @@ struct AgentCfgPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if model.registrationBlocked {
+                Banner(text: DaemonRegistrar.translocatedMessage, style: .warning)
+            }
             if let message = model.status?.message, !message.isEmpty {
                 Banner(text: message, style: .info)
             }
@@ -133,11 +157,14 @@ struct AgentCfgPanel: View {
                     Task { await model.preparePlan() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.status?.cliFound != true || model.busy)
+                .disabled(model.status?.cliFound != true || model.busy || model.registrationBlocked)
             }
         }
         .task {
-            if model.status == nil { await model.refresh() }
+            // Show what is known at once, then re-read it: Claude Code may
+            // have been installed or updated since the last fetch.
+            model.markNoticeSeen()
+            await model.refresh()
             // Development aid: FARERO_DEBUG_AUTOPLAN=1 opens the plan sheet.
             if ProcessInfo.processInfo.environment["FARERO_DEBUG_AUTOPLAN"] == "1", model.plan == nil {
                 await model.preparePlan()

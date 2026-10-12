@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/farero-dev/farero/daemon/internal/broker"
@@ -61,16 +60,21 @@ type Core struct {
 	corr     *correlate.Correlator
 	broker   *broker.Broker
 	plugins  *upstream.Registry
-	gateway  *gateway.Gateway
 	hub      *hub
 
 	connectors map[string]Connector
 	extraUI    map[string]UIHandler
 
 	mu          sync.Mutex
+	gateway     *gateway.Gateway // nil until StartGateway
 	gatewayInfo ipc.GatewayInfo
+	tools       []*mcp.Tool // the exposed list, kept for a gateway started later
 	pluginErr   map[string]string
 	toolIndex   map[string]exposedTool // exposed name -> plugin/tool
+	hidden      map[string]string      // plugin -> upstream tools missing from the table, as last logged
+
+	waits agentWaits // PermissionRequests waiting for the app
+	uses  toolUses   // tool_use_ids, for answers the agent did not follow
 }
 
 type exposedTool struct {
@@ -99,6 +103,10 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		connectors: o.Connectors,
 		pluginErr:  map[string]string{},
 		toolIndex:  map[string]exposedTool{},
+		hidden:     map[string]string{},
+	}
+	for _, ov := range c.policy.IgnoredOverrides() {
+		o.Log.Warn("policy override ignored: the tool now requires approval every time (Q33)", "override", ov)
 	}
 	c.broker = broker.New(c, o.ApprovalTimeout)
 	c.sessions, err = session.NewManager(ctx, o.Store, func(s model.Session) {
@@ -107,11 +115,6 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	if err != nil {
 		return nil, err
 	}
-	secretValue, err := secret.GetOrCreate(o.Secrets, secret.KeyGatewaySecret, secret.RandomToken)
-	if err != nil {
-		return nil, fmt.Errorf("gateway secret: %w", err)
-	}
-	c.gateway = gateway.New(o.Version, secretValue, c, o.Log)
 	return c, nil
 }
 
@@ -122,11 +125,28 @@ func (c *Core) Policy() *policy.Engine { return c.policy }
 func (c *Core) Plugins() *upstream.Registry { return c.plugins }
 
 // StartGateway starts the MCP listener on the saved port, choosing a free
-// one on first run and saving it (Q57).
+// one on first run and saving it (Q57). It reads the gateway secret, so it
+// may wait for a Keychain prompt: with ad-hoc signing every update asks again
+// (M0 2026-10-06). farerod opens its socket before calling it, so the app
+// connects meanwhile; BroadcastSnapshot then tells the app.
 func (c *Core) StartGateway(ctx context.Context) error {
+	secretValue, err := secret.GetOrCreate(c.secrets, secret.KeyGatewaySecret, secret.RandomToken)
+	if err != nil {
+		c.mu.Lock()
+		c.gatewayInfo = ipc.GatewayInfo{Error: "gateway secret: " + err.Error()}
+		c.mu.Unlock()
+		return fmt.Errorf("gateway secret: %w", err)
+	}
+	g := gateway.New(c.version, secretValue, c, c.log)
+	c.mu.Lock()
+	c.gateway = g
+	tools := c.tools
+	c.mu.Unlock()
+	g.SetTools(tools)
+
 	saved, _ := c.store.Setting(ctx, settingGatewayPort)
 	port, _ := strconv.Atoi(saved)
-	bound, err := c.gateway.Start(port)
+	bound, err := g.Start(port)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err != nil {
@@ -151,7 +171,12 @@ func (c *Core) GatewayInfo() ipc.GatewayInfo {
 
 // Shutdown stops the gateway and closes plugins.
 func (c *Core) Shutdown(ctx context.Context) {
-	c.gateway.Shutdown(ctx)
+	c.mu.Lock()
+	g := c.gateway
+	c.mu.Unlock()
+	if g != nil {
+		g.Shutdown(ctx)
+	}
 	c.plugins.Close()
 }
 
@@ -174,21 +199,86 @@ func (c *Core) RefreshTools(ctx context.Context) {
 			c.log.Warn("list tools", "plugin", p.Name(), "err", err)
 			continue
 		}
+		var hidden []string
 		for _, t := range list {
 			eff, ok := c.policy.Lookup(p.Name(), t.Name)
-			if !ok || eff.Level == policy.LevelBlock {
+			if !ok {
+				hidden = append(hidden, t.Name)
+				continue
+			}
+			if eff.Level == policy.LevelBlock {
 				continue
 			}
 			name := policy.ToolKey(p.Name(), t.Name)
 			index[name] = exposedTool{plugin: p.Name(), tool: t.Name}
 			tools = append(tools, exposeTool(name, t, eff))
 		}
+		c.noteHidden(p.Name(), hidden)
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	c.mu.Lock()
 	c.toolIndex = index
+	c.tools = tools
+	g := c.gateway
 	c.mu.Unlock()
-	c.gateway.SetTools(tools)
+	if g != nil {
+		g.SetTools(tools)
+	}
+}
+
+// noteHidden logs a plugin's upstream tools that the table does not
+// classify, when that set changes. They stay hidden (기능 명세서 6-2); the log
+// shows when an upstream adds or renames tools.
+func (c *Core) noteHidden(plugin string, names []string) {
+	sort.Strings(names)
+	joined := strings.Join(names, ",")
+	c.mu.Lock()
+	changed := c.hidden[plugin] != joined
+	c.hidden[plugin] = joined
+	c.mu.Unlock()
+	if changed && joined != "" {
+		c.log.Info("upstream tools not in the classification table are hidden", "plugin", plugin, "count", len(names), "tools", joined)
+	}
+}
+
+// PluginTools lists a connected plugin's live upstream tools next to their
+// classification, plus the table's tools for it that the upstream no longer
+// lists. It is how the table is checked against a real tools/list
+// (기능 명세서 6-4).
+func (c *Core) PluginTools(ctx context.Context, plugin string) (ipc.PluginTools, error) {
+	p, ok := c.plugins.Get(plugin)
+	if !ok {
+		return ipc.PluginTools{}, fmt.Errorf("plugin %q is not connected", plugin)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	list, err := p.ListTools(ctx)
+	if err != nil {
+		return ipc.PluginTools{}, err
+	}
+	out := ipc.PluginTools{Plugin: plugin, Tools: []ipc.PluginTool{}, Missing: []string{}}
+	listed := map[string]bool{}
+	for _, t := range list {
+		listed[t.Name] = true
+		pt := ipc.PluginTool{Name: t.Name, Title: t.Title, Description: t.Description}
+		if a := t.Annotations; a != nil {
+			pt.ReadOnlyHint = a.ReadOnlyHint
+			pt.DestructiveHint = a.DestructiveHint
+		}
+		if eff, ok := c.policy.Lookup(plugin, t.Name); ok {
+			pt.Classified = true
+			pt.Level = eff.Level
+			pt.Exposed = eff.Level != policy.LevelBlock
+		}
+		out.Tools = append(out.Tools, pt)
+	}
+	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
+	for _, ti := range c.policy.Tools() {
+		if ti.Plugin == plugin && !listed[ti.Tool] {
+			out.Missing = append(out.Missing, ti.Tool)
+		}
+	}
+	return out, nil
 }
 
 func exposeTool(name string, t *mcp.Tool, eff policy.Effective) *mcp.Tool {
@@ -230,25 +320,25 @@ func (c *Core) ApprovalCancelled(id, reason string) {
 	c.hub.broadcast(ipc.TypeApprovalCancelled, ipc.ApprovalCancelled{ApprovalID: id, Reason: reason})
 }
 
-// SweepLoop periodically marks silent sessions with dead processes unknown.
+// sweepEvery is how often SweepLoop looks at sessions. Interrupts and exits
+// without a hook event show up within this time.
+const sweepEvery = 3 * time.Second
+
+// SweepLoop keeps session states right where Claude Code sends no hook
+// event: sessions whose agent process is gone become unknown, and turns
+// the user interrupted (Esc, Ctrl-C) wait for input.
 func (c *Core) SweepLoop(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(sweepEvery)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			for _, pid := range c.sessions.Sweep(ctx, processAlive) {
-				c.corr.Forget(pid)
-			}
+			c.sessions.Sweep(ctx, processAlive)
+			c.sessions.CheckInterrupts(ctx)
 		}
 	}
-}
-
-func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
 }
 
 func sessionLabel(s model.Session) string {
@@ -260,26 +350,40 @@ func sessionLabel(s model.Session) string {
 
 func (c *Core) resultLimit(ctx context.Context) int {
 	v, _ := c.store.Setting(ctx, settingResultLimit)
-	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+	if n, err := strconv.Atoi(v); err == nil && validResultLimit(n) {
 		return n
 	}
 	return store.DefaultResultLimit
 }
 
-func (c *Core) logCall(ctx context.Context, call model.Call) {
+func validResultLimit(n int) bool {
+	return n >= store.MinResultLimit && n <= store.MaxResultLimit
+}
+
+// logCall writes an audit log row and returns its id (0 if it failed). s is
+// the call's session as it was when the call came in (nil for an unknown
+// session): the user may have deleted it while the call waited for its card,
+// and the row needs the session back (5-1).
+func (c *Core) logCall(ctx context.Context, call model.Call, s *model.Session) int64 {
 	limit := c.resultLimit(ctx)
 	call.ResultBytes = len(call.ResultText)
 	call.ResultText = store.TruncateUTF8(call.ResultText, limit)
 	if len(call.Input) == 0 {
 		call.Input = json.RawMessage(`{}`)
 	}
+	if s != nil && call.SessionID != "" {
+		if err := c.sessions.Revive(ctx, *s); err != nil {
+			c.log.Error("revive session", "session", s.ID, "err", err)
+		}
+	}
 	id, err := c.store.InsertCall(ctx, call)
 	if err != nil {
 		c.log.Error("audit log", "err", err)
-		return
+		return 0
 	}
 	call.ID = id
 	c.hub.broadcast(ipc.TypeCallLogged, trimForBroadcast(call))
+	return id
 }
 
 // Broadcast limits: call.logged tells the app that something happened (for

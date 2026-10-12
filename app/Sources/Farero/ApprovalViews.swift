@@ -13,7 +13,8 @@ struct ApprovalContent: View {
         let approvals = model.state.approvals
         VStack(spacing: 8) {
             HStack {
-                CharacterView(state: model.character, size: NotchStyle.compactCharacter)
+                CharacterView(state: model.character, size: NotchStyle.compactCharacter,
+                              sessionCount: model.state.runningSessionCount)
                 Spacer()
                 if approvals.count > 1 {
                     Text("\(approvals.count)개 대기")

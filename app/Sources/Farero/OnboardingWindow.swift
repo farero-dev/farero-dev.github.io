@@ -1,3 +1,4 @@
+import AppKit
 import FareroCore
 import SwiftUI
 
@@ -57,7 +58,11 @@ struct OnboardingView: View {
                 Spacer()
                 if step < Self.titles.count - 1 {
                     if step == 2 { Button("건너뛰기") { step += 1 } }
-                    Button("다음") { step += 1 }.keyboardShortcut(.defaultAction)
+                    // The Claude Code step needs farerod, so the daemon step
+                    // waits for the connection (the window stays closable).
+                    Button("다음") { step += 1 }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(step == 0 && !model.state.isConnected)
                 } else {
                     Button("시작하기") { finish() }.keyboardShortcut(.defaultAction)
                 }
@@ -99,6 +104,8 @@ struct OnboardingView: View {
             Text("준비가 끝났습니다").font(.title2.bold())
             Label("세션이 진행 중이면 노치 옆에 등대가 보입니다. 마우스를 올리거나 누르면 세션 목록이 펼쳐지고, 터미널 버튼으로 그 세션의 터미널로 갈 수 있습니다.",
                   systemImage: "rectangle.topthird.inset.filled")
+            Label("세션 줄을 처음 눌러 터미널로 이동할 때 macOS가 Farero의 Terminal 제어를 허용할지 묻습니다. 허용해 주세요. 나중에 시스템 설정 > 개인정보 보호 및 보안 > 자동화에서 바꿀 수 있습니다.",
+                  systemImage: "lock.shield")
             Label("승인이 필요한 도구 호출은 노치 아래 카드로 뜹니다. 입력값 전체와 승인을 묻는 이유를 확인하고 고르세요. 10분 안에 답하지 않으면 자동으로 거부됩니다.",
                   systemImage: "checkmark.shield")
             VStack(alignment: .leading, spacing: 6) {
@@ -111,6 +118,7 @@ struct OnboardingView: View {
                 .padding(.leading, 28)
             }
             Label("메뉴바의 등대 아이콘에서 설정, 플러그인 연결, 로그 검색을 열 수 있습니다.", systemImage: "menubar.rectangle")
+            Label(DaemonStep.keychainGuide, systemImage: "key")
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -120,6 +128,10 @@ struct OnboardingView: View {
 struct DaemonStep: View {
     let model: AppModel
 
+    /// Ad-hoc signing (Q47): every update is a new code signature to the
+    /// Keychain, and farerod's gateway waits until the user allows it.
+    static let keychainGuide = "앱을 업데이트하면 macOS가 farerod의 키체인 항목 사용을 다시 묻습니다. 로그인 암호를 입력하고 ‘항상 허용’을 고르세요. 허용하기 전까지는 게이트웨이가 시작되지 않습니다."
+
     var body: some View {
         let registrar = model.registrar
         VStack(alignment: .leading, spacing: 12) {
@@ -127,6 +139,15 @@ struct DaemonStep: View {
             Text("farerod는 로그인 항목으로 백그라운드에서 실행되며 세션 상태, 승인 대기열, 감사 로그를 맡습니다. 앱은 그 화면입니다.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if registrar.status == .translocated {
+                Banner(text: DaemonRegistrar.translocatedMessage, style: .warning)
+                HStack {
+                    Button("Finder에서 보기") { registrar.revealInFinder() }
+                    Button("종료") { NSApp.terminate(nil) }
+                }
+            } else if DaemonRegistrar.installLocation == .elsewhere, DaemonRegistrar.skipReason() == nil {
+                Banner(text: "Farero.app을 응용 프로그램 폴더에 두는 것을 권합니다. 옮기면 다음 실행 때 등록을 그 위치로 고칩니다.", style: .info)
+            }
             Form {
                 LabeledContent("로그인 항목") { Text(model.registrationLabel) }
                 LabeledContent("연결") {
@@ -141,14 +162,14 @@ struct DaemonStep: View {
                 }
             }
             .formStyle(.grouped)
-            if registrar.status == .requiresApproval {
-                Banner(text: "macOS가 farero 데몬의 실행 허락을 기다립니다. 시스템 설정 > 일반 > 로그인 항목에서 Farero를 켜세요. 켜면 곧바로 연결됩니다.",
-                       style: .warning)
+            if case .failed(let message) = registrar.status {
+                Banner(text: "데몬을 시작하지 못했습니다: \(message)\n시스템 설정 > 일반 > 로그인 항목에서 farero의 백그라운드 실행이 꺼져 있다면 켜 주세요.",
+                       style: .error)
                 Button("로그인 항목 설정 열기") { registrar.openLoginItemsSettings() }
-            } else if case .failed(let message) = registrar.status {
-                Banner(text: "데몬을 등록하지 못했습니다: \(message)", style: .error)
             } else if !model.state.isConnected {
-                Banner(text: "데몬에 연결하는 중입니다. 계속 연결되지 않으면 앱을 다시 실행해 보세요.", style: .info)
+                Banner(text: "데몬에 연결하는 중입니다. 연결되면 ‘다음’으로 갈 수 있습니다. 계속 연결되지 않으면 앱을 다시 실행해 보세요.", style: .info)
+            } else if !model.state.gateway.running {
+                Banner(text: "데몬이 실행 중이지만 게이트웨이는 아직입니다: \(model.state.gateway.error.isEmpty ? "키체인 접근 허용을 기다리는 중일 수 있습니다" : model.state.gateway.error)", style: .warning)
             } else {
                 Banner(text: "데몬이 실행 중입니다.", style: .success)
             }
@@ -156,6 +177,10 @@ struct DaemonStep: View {
                 registrar.refresh()
                 model.registrationLabel = registrar.status.label
             }
+            Label(Self.keychainGuide, systemImage: "key")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

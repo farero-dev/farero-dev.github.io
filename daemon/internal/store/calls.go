@@ -11,8 +11,19 @@ import (
 	"github.com/farero-dev/farero/daemon/internal/model"
 )
 
-// DefaultResultLimit is the per-call result size stored in the log (Q46).
-const DefaultResultLimit = 16 * 1024
+// Per-call result size stored in the log (Q46): the default and the range
+// the user can choose from.
+const (
+	DefaultResultLimit = 16 << 10
+	MinResultLimit     = 1 << 10
+	MaxResultLimit     = 1 << 20
+)
+
+// Log query page sizes.
+const (
+	DefaultQueryLimit = 200
+	MaxQueryLimit     = 1000
+)
 
 // TruncateUTF8 cuts s to at most limit bytes without splitting a rune.
 func TruncateUTF8(s string, limit int) string {
@@ -43,6 +54,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// SetCallDecision rewrites a row's decision and reason, for a decision that
+// turned out not to be the one the agent followed.
+func (s *Store) SetCallDecision(ctx context.Context, id int64, decision, reason string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE calls SET decision = ?, reason = ? WHERE id = ?`, decision, reason, id)
+	return err
 }
 
 // CallFilter selects audit log rows. Zero values mean "any".
@@ -134,8 +152,11 @@ func (s *Store) QueryCalls(ctx context.Context, f CallFilter) ([]model.Call, err
 		q += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	limit := f.Limit
-	if limit <= 0 || limit > 1000 {
-		limit = 200
+	switch {
+	case limit <= 0:
+		limit = DefaultQueryLimit
+	case limit > MaxQueryLimit:
+		limit = MaxQueryLimit
 	}
 	q += ` ORDER BY c.ts DESC, c.id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, f.Offset)

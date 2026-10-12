@@ -31,13 +31,15 @@ public struct CharacterResolution: Sendable, Equatable {
 }
 
 /// Picks the character state from the app state (F-12). Highest priority
-/// first: disconnected > needsApproval > allowed > denied > error > caution >
-/// workingMany > working > thinking > greeting > waitingInput > sleeping.
+/// first: disconnected > needsApproval > allowed > denied > error >
+/// disconnected (unknown session) > caution > workingMany > working >
+/// thinking > greeting > waitingInput > sleeping.
 public enum CharacterResolver {
     public static let allowedDuration: TimeInterval = 1.5
     public static let deniedDuration: TimeInterval = 1.5
     public static let errorDuration: TimeInterval = 3
     public static let greetingDuration: TimeInterval = 2
+    public static let unknownSessionDuration: TimeInterval = 3
 
     public static func resolve(_ s: AppState, now: Date) -> CharacterResolution {
         // Every timer still running; any of them ending can change the result.
@@ -52,6 +54,7 @@ public enum CharacterResolver {
         let allowed = running(s.lastAllowedAt, allowedDuration)
         let denied = running(s.lastDeniedAt, deniedDuration)
         let error = running(s.lastErrorAt, errorDuration)
+        let unknownSession = running(s.lastUnknownSessionAt, unknownSessionDuration)
         let active = s.sessions.values.filter { $0.status.isActive }
         let greeting = !active.filter { running(s.sessionAppearedAt[$0.id], greetingDuration) }.isEmpty
         let next = deadlines.min()
@@ -64,6 +67,9 @@ public enum CharacterResolver {
         if allowed { return result(.allowed) }
         if denied { return result(.denied) }
         if error { return result(.error) }
+        // F-12 shows a gateway call with no session as 연결 끊김 as well: the
+        // call reached farerod, but farero could not tell whose it was.
+        if unknownSession { return result(.disconnected) }
         if active.contains(where: \.tainted) { return result(.caution) }
         let runningSessions = active.filter { $0.status == .running }
         if runningSessions.count >= 2 { return result(.workingMany) }

@@ -1,442 +1,428 @@
+import AppKit
+import CoreText
 import SwiftUI
 
 /// Draws one frame of the lighthouse into a `GraphicsContext`.
 ///
-/// Geometry is laid out on a grid 22 units tall and `unitWidth` units wide, so
-/// at 22 pt one unit is one point. Outline edges sit on half units, which keeps
-/// 1-unit strokes on whole pixels at 22 pt.
+/// The drawing follows the SVG of the design canvas "등대 v2 (확정)" on its
+/// 24 × 24 unit grid, so at 22 pt one unit is 22/24 pt and the eyes are about
+/// 2.2 pt wide. It is the same picture at every size: outlines scale with it.
+/// Like the canvas (`overflow: visible`), the hop and the stretch may draw a
+/// little above the frame.
 struct LighthouseRenderer {
-    static let unitHeight: CGFloat = 22
+    static let unitHeight: CGFloat = 24
     static let unitWidth: CGFloat = 24
 
+    /// The separately animated parts of the drawing, in back-to-front order.
+    /// They match the canvas's animated groups: the turning beam, the body
+    /// (which breathes, hops or shakes) and the badge (which stays put).
+    struct Parts: OptionSet, Hashable, Sendable {
+        let rawValue: Int
+        static let beam = Parts(rawValue: 1)
+        static let body = Parts(rawValue: 2)
+        static let badge = Parts(rawValue: 4)
+        static let all: Parts = [.beam, .body, .badge]
+    }
+
     let state: LighthouseState
-    let time: TimeInterval
-    let reduceMotion: Bool
+    let lamp: LampOutput
+    let pose: LighthousePose
+    let sleepZ: SleepZFrame
+    let sessionCount: Int?
+    var parts: Parts = .all
 
-    // Tower center line and key heights (units, y grows downward).
-    private let cx: CGFloat = 11
-    private let baseTop: CGFloat = 19.5
-    private let lanternTop: CGFloat = 4.5
-    private let lanternBottom: CGFloat = 9.5
-    private let lanternHalfWidth: CGFloat = 3.5
-    private let eyeY: CGFloat = 14.6
-    private let eyeSpacing: CGFloat = 2.3
+    /// The drawing at time `time` for a frame `size` points tall.
+    init(state: LighthouseState, time: TimeInterval, reduceMotion: Bool, size: CGFloat, sessionCount: Int?) {
+        self.state = state
+        lamp = LighthouseLight.output(for: state, at: time, reduceMotion: reduceMotion)
+        pose = LighthouseLight.pose(for: state, at: time, reduceMotion: reduceMotion, size: size)
+        sleepZ = LighthouseLight.sleepZ(at: time, reduceMotion: reduceMotion)
+        self.sessionCount = sessionCount
+    }
 
+    /// The drawing with the given lamp, motion and "z", limited to `parts`.
+    init(
+        state: LighthouseState, lamp: LampOutput, pose: LighthousePose = .still, sleepZ: SleepZFrame = .rest,
+        sessionCount: Int?, parts: Parts = .all
+    ) {
+        self.state = state
+        self.lamp = lamp
+        self.pose = pose
+        self.sleepZ = sleepZ
+        self.sessionCount = sessionCount
+        self.parts = parts
+    }
+
+    /// The foot of the tower: gestures lean and scale around it.
+    static let foot = CGPoint(x: 12, y: 23.2)
+    /// The lamp, and the pivot of the beam.
+    static let lampCenter = CGPoint(x: 12, y: 8.3)
+    /// The center of the badge, up and to the left of the lantern.
+    private static let badgeCenter = CGPoint(x: 3.9, y: 4.3)
+    /// The outline width. Outlines are drawn under the fill (SVG
+    /// `paint-order: stroke`), so half of it shows.
+    private static let outline: CGFloat = 1.7
+
+    /// Draws into a frame of `size`, the character's 24-unit square scaled to its height.
     func draw(in context: GraphicsContext, size: CGSize) {
         let u = size.height / Self.unitHeight
         guard u > 0 else { return }
         var ctx = context
+        ctx.translateBy(x: (size.width - Self.unitWidth * u) / 2, y: 0)
         ctx.scaleBy(x: u, y: u)
-
-        let pointHeight = size.height
-        let style = Style(pointHeight: pointHeight, unit: u)
-        let lamp = LighthouseLight.output(for: state, at: time, reduceMotion: reduceMotion)
-        let blinking = LighthouseLight.isBlinking(state, at: time, reduceMotion: reduceMotion)
-        let hop = LighthouseLight.hopHeight(state, at: time, reduceMotion: reduceMotion)
         let gesture = state.gesture
 
-        // The base only hops. The rest leans and squashes around the top of the base.
-        var grounded = ctx
-        grounded.translateBy(x: 0, y: -CGFloat(hop) * 1.4)
-        var body = grounded
-        body.translateBy(x: cx, y: baseTop)
-        body.rotate(by: .degrees(gesture.leanDegrees))
-        body.scaleBy(x: 1, y: gesture.heightScale)
-        body.translateBy(x: -cx, y: -baseTop)
-
-        if let angle = lamp.beamAngle, let color = lamp.color {
-            drawBeam(in: body, angle: angle, color: color, style: style)
-        }
-        drawTower(in: body, lamp: lamp, style: style)
-        drawBase(in: grounded, style: style)
-        drawEyes(in: body, eyes: blinking ? nil : state.eyes, style: style)
-        if state.badge == .slash {
-            drawLanternSlash(in: body, style: style)
+        // The beam turns behind the tower and does not breathe with it.
+        if parts.contains(.beam), let reach = lamp.beamReach, let color = lamp.color {
+            drawBeam(in: ctx, reach: reach, color: color)
         }
 
-        // Badges stay upright next to the lamp and follow the hop.
-        var badge = ctx
-        badge.translateBy(x: 0, y: -CGFloat(hop) * 1.4)
-        drawBadge(in: badge, style: style)
-    }
-
-    // MARK: - Style
-
-    struct Style {
-        /// Outline width in units: 1 pt at 22 pt, growing a bit slower than the size.
-        let line: CGFloat
-        /// Whether to add details that only read at larger sizes.
-        let detailed: Bool
-
-        init(pointHeight: CGFloat, unit: CGFloat) {
-            let scale = pointHeight / LighthouseRenderer.unitHeight
-            let points = max(0.75, pow(scale, 0.78))
-            line = points / unit
-            detailed = pointHeight >= 40
+        // Motion (hop, shake, breath), then the posture, both around the foot.
+        if parts.contains(.body) {
+            var body = ctx
+            body.translateBy(x: pose.offsetX, y: pose.offsetY)
+            Self.scale(&body, x: 1, y: pose.breath, around: Self.foot)
+            Self.rotate(&body, degrees: gesture.leanDegrees, around: Self.foot)
+            Self.scale(&body, x: gesture.widthScale, y: gesture.heightScale, around: Self.foot)
+            drawBody(in: body, lamp: lamp)
         }
 
-        func stroke(_ width: CGFloat? = nil) -> StrokeStyle {
-            StrokeStyle(lineWidth: width ?? line, lineCap: .round, lineJoin: .round)
+        // The badge stays where it is while the body moves.
+        if parts.contains(.badge) {
+            drawBadge(in: ctx, lamp: lamp)
         }
     }
 
-    private var ink: Color { LighthousePalette.ink.color }
-    private var white: Color { LighthousePalette.body.color }
-    private var gray: Color { LighthousePalette.structure.color }
+    // MARK: - Helpers
 
-    private func fillAndStroke(_ path: Path, _ fill: Color, in ctx: GraphicsContext, style: Style) {
-        ctx.fill(path, with: .color(fill))
-        ctx.stroke(path, with: .color(ink), style: style.stroke())
+    private static func scale(_ ctx: inout GraphicsContext, x: CGFloat, y: CGFloat, around p: CGPoint) {
+        guard x != 1 || y != 1 else { return }
+        ctx.translateBy(x: p.x, y: p.y)
+        ctx.scaleBy(x: x, y: y)
+        ctx.translateBy(x: -p.x, y: -p.y)
     }
 
-    // MARK: - Tower
+    private static func rotate(_ ctx: inout GraphicsContext, degrees: Double, around p: CGPoint) {
+        guard degrees != 0 else { return }
+        ctx.translateBy(x: p.x, y: p.y)
+        ctx.rotate(by: .degrees(degrees))
+        ctx.translateBy(x: -p.x, y: -p.y)
+    }
 
-    private func drawTower(in ctx: GraphicsContext, lamp: LampOutput, style: Style) {
-        let bodyColor = state.isDimmed ? gray : white
+    private static func circle(_ c: CGPoint, _ r: CGFloat) -> Path {
+        Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+    }
 
-        // Tower: short and wide, slightly flared toward the base. It runs a
-        // little into the base so a lean never opens a gap.
+    private static func polygon(_ points: [CGPoint]) -> Path {
+        var p = Path()
+        p.addLines(points)
+        p.closeSubpath()
+        return p
+    }
+
+    private static func line(_ width: CGFloat) -> StrokeStyle {
+        StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
+    }
+
+    /// The ink outline under the fill, like SVG `paint-order: stroke`.
+    private static func outlined(
+        _ path: Path, _ fill: LighthouseRGB, in ctx: GraphicsContext,
+        width: CGFloat = outline, join: CGLineJoin = .miter
+    ) {
+        ctx.stroke(
+            path, with: .color(LighthousePalette.ink.color),
+            style: StrokeStyle(lineWidth: width, lineJoin: join, miterLimit: 4))
+        ctx.fill(path, with: .color(fill.color))
+    }
+
+    // MARK: - Body
+
+    private func drawBody(in ctx: GraphicsContext, lamp: LampOutput) {
+        let palette = LighthousePalette.self
+        let bodyColor = state.isDimmed ? palette.dimBody : palette.body
+        let structure = state.isDimmed ? palette.dimStructure : palette.structure
+        let ink = palette.ink.color
+
+        // Tower: a trapezoid, wide and short, with rounded bottom corners.
         var tower = Path()
-        tower.move(to: CGPoint(x: cx - 4.5, y: 11.5))
-        tower.addLine(to: CGPoint(x: cx + 4.5, y: 11.5))
-        tower.addQuadCurve(to: CGPoint(x: cx + 6, y: baseTop), control: CGPoint(x: cx + 5.0, y: 16.5))
-        tower.addLine(to: CGPoint(x: cx + 6.1, y: baseTop + 1))
-        tower.addLine(to: CGPoint(x: cx - 6.1, y: baseTop + 1))
-        tower.addLine(to: CGPoint(x: cx - 6, y: baseTop))
-        tower.addQuadCurve(to: CGPoint(x: cx - 4.5, y: 11.5), control: CGPoint(x: cx - 5.0, y: 16.5))
+        tower.move(to: CGPoint(x: 8.0, y: 12.4))
+        tower.addLine(to: CGPoint(x: 16.0, y: 12.4))
+        tower.addLine(to: CGPoint(x: 17.8, y: 22.6))
+        tower.addQuadCurve(to: CGPoint(x: 17.3, y: 23.2), control: CGPoint(x: 17.9, y: 23.2))
+        tower.addLine(to: CGPoint(x: 6.7, y: 23.2))
+        tower.addQuadCurve(to: CGPoint(x: 6.2, y: 22.6), control: CGPoint(x: 6.1, y: 23.2))
         tower.closeSubpath()
-        fillAndStroke(tower, bodyColor, in: ctx, style: style)
+        Self.outlined(tower, bodyColor, in: ctx, join: .round)
 
-        // Lantern glass: one solid color, lit or not.
-        let glassRect = CGRect(x: cx - lanternHalfWidth, y: lanternTop,
-                               width: lanternHalfWidth * 2, height: lanternBottom - lanternTop)
-        let glassColor = lamp.color.map { LighthousePalette.lamp($0).color } ?? LighthousePalette.glass.color
-        ctx.fill(Path(glassRect), with: .color(glassColor))
-        if style.detailed {
-            // Mullions.
-            var mullions = Path()
-            for dx in [-1.2, 1.2] as [CGFloat] {
-                mullions.move(to: CGPoint(x: cx + dx, y: lanternTop))
-                mullions.addLine(to: CGPoint(x: cx + dx, y: lanternBottom))
-            }
-            ctx.stroke(mullions, with: .color(ink), style: style.stroke(style.line * 0.55))
-        }
-        ctx.stroke(Path(glassRect), with: .color(ink), style: style.stroke())
+        // One band across the tower.
+        let band = Self.polygon([
+            CGPoint(x: 6.81, y: 19.2), CGPoint(x: 17.19, y: 19.2),
+            CGPoint(x: 17.48, y: 20.8), CGPoint(x: 6.52, y: 20.8),
+        ])
+        ctx.fill(band, with: .color(structure.color))
 
-        // Gallery deck.
-        let deck = Path(roundedRect: CGRect(x: cx - 5.5, y: 9.5, width: 11, height: 2), cornerRadius: 0.6)
-        fillAndStroke(deck, gray, in: ctx, style: style)
+        drawEyes(in: ctx)
 
-        if style.detailed {
-            // Railing on the deck, beside the lantern.
-            var rail = Path()
-            for side in [-1.0, 1.0] as [CGFloat] {
-                rail.move(to: CGPoint(x: cx + side * lanternHalfWidth, y: 8.2))
-                rail.addLine(to: CGPoint(x: cx + side * 5.0, y: 8.2))
-                rail.addLine(to: CGPoint(x: cx + side * 5.0, y: 9.5))
-                rail.move(to: CGPoint(x: cx + side * 4.25, y: 8.2))
-                rail.addLine(to: CGPoint(x: cx + side * 4.25, y: 9.5))
-            }
-            ctx.stroke(rail, with: .color(ink), style: style.stroke(style.line * 0.55))
+        if state.isCracked {
+            var crack = Path()
+            crack.addLines([
+                CGPoint(x: 13.6, y: 17.9), CGPoint(x: 12.5, y: 19.2),
+                CGPoint(x: 13.8, y: 20.2), CGPoint(x: 12.8, y: 21.7),
+            ])
+            ctx.stroke(crack, with: .color(palette.structure.color), style: Self.line(0.9))
         }
 
-        // Domed roof with a small ball on top.
-        var roof = Path()
-        roof.move(to: CGPoint(x: cx - 4.6, y: lanternTop))
-        roof.addCurve(to: CGPoint(x: cx, y: 1.9),
-                      control1: CGPoint(x: cx - 4.4, y: 2.6), control2: CGPoint(x: cx - 2.4, y: 1.9))
-        roof.addCurve(to: CGPoint(x: cx + 4.6, y: lanternTop),
-                      control1: CGPoint(x: cx + 2.4, y: 1.9), control2: CGPoint(x: cx + 4.4, y: 2.6))
-        roof.closeSubpath()
-        fillAndStroke(roof, gray, in: ctx, style: style)
-
-        // Finial: a small ball on a short stem.
-        var stem = Path()
-        stem.move(to: CGPoint(x: cx, y: 2.0))
-        stem.addLine(to: CGPoint(x: cx, y: 1.4))
-        ctx.stroke(stem, with: .color(ink), style: style.stroke())
-        let ball = Path(ellipseIn: CGRect(x: cx - 0.75, y: 0.55, width: 1.5, height: 1.5))
-        ctx.fill(ball, with: .color(gray))
-        ctx.stroke(ball, with: .color(ink), style: style.stroke(style.detailed ? style.line * 0.7 : style.line))
-    }
-
-    private func drawBase(in ctx: GraphicsContext, style: Style) {
-        let base = Path(roundedRect: CGRect(x: cx - 7.5, y: baseTop, width: 15, height: 2), cornerRadius: 1)
-        fillAndStroke(base, gray, in: ctx, style: style)
-    }
-
-    // MARK: - Beam
-
-    private func drawBeam(in ctx: GraphicsContext, angle: Double, color: LampColor, style: Style) {
-        let centerY = (lanternTop + lanternBottom) / 2
-        if state.beamCount >= 2 {
-            // Two narrower beams from one lens, the lower one a little behind.
-            drawCone(in: ctx, angle: angle - LighthouseLight.Timing.secondBeamLag, centerY: centerY + 1.25,
-                     nearHalf: 0.55, farHalf: 0.65, spread: 1.25, color: color, style: style)
-            drawCone(in: ctx, angle: angle, centerY: centerY - 1.25,
-                     nearHalf: 0.55, farHalf: 0.65, spread: 1.25, color: color, style: style)
-        } else {
-            drawCone(in: ctx, angle: angle, centerY: centerY,
-                     nearHalf: 0.9, farHalf: 1.0, spread: 2.1, color: color, style: style)
+        // Lantern: a thick ink outline, the glass (ink when dark, the lamp
+        // color mixed with ink when lit), a thin frame, and the round lamp.
+        let glass = Path(
+            roundedRect: CGRect(x: 8.0, y: 5.6, width: 8.0, height: 5.4), cornerRadius: 1.2,
+            style: .circular)
+        ctx.stroke(glass, with: .color(ink), lineWidth: 2.7)
+        ctx.fill(glass, with: .color(lamp.glassColor.map(palette.glass)?.color ?? ink))
+        ctx.stroke(glass, with: .color(structure.color), lineWidth: 1.0)
+        if let color = lamp.color {
+            ctx.fill(Self.circle(Self.lampCenter, 1.9), with: .color(palette.lamp(color).color))
         }
-    }
 
-    /// One light cone seen from the side: its length and spread follow how far
-    /// the beam points sideways (`sin(angle)`).
-    private func drawCone(in ctx: GraphicsContext, angle: Double, centerY: CGFloat, nearHalf: CGFloat,
-                          farHalf baseFarHalf: CGFloat, spread: CGFloat, color: LampColor, style: Style) {
-        let s = CGFloat(sin(angle))
-        let reach = abs(s)
-        guard reach > 0.08 else { return }
-        let side: CGFloat = s > 0 ? 1 : -1
-        let nearX = cx
-        let farX = cx + side * (lanternHalfWidth + 6.9 * reach)
-        let farHalf = baseFarHalf + spread * reach
-        let top0 = CGPoint(x: nearX, y: centerY - nearHalf)
-        let top1 = CGPoint(x: farX, y: centerY - farHalf)
-        let bottom1 = CGPoint(x: farX, y: centerY + farHalf)
-        let bottom0 = CGPoint(x: nearX, y: centerY + nearHalf)
-
-        var cone = Path()
-        cone.move(to: top0)
-        cone.addLine(to: top1)
-        cone.addQuadCurve(to: bottom1, control: CGPoint(x: farX + side * 0.9 * reach * farHalf / 3.1, y: centerY))
-        cone.addLine(to: bottom0)
-        cone.closeSubpath()
-        ctx.fill(cone, with: .color(LighthousePalette.lamp(color).color))
-        // Outline the sides only: the open end reads as light, not a flag.
-        var edges = Path()
-        edges.move(to: top0)
-        edges.addLine(to: top1)
-        edges.move(to: bottom0)
-        edges.addLine(to: bottom1)
-        ctx.stroke(edges, with: .color(ink), style: style.stroke())
+        // Roof, the ball on top, and the gallery.
+        let roof = Self.polygon([CGPoint(x: 7.3, y: 5.9), CGPoint(x: 12, y: 2.4), CGPoint(x: 16.7, y: 5.9)])
+        Self.outlined(roof, structure, in: ctx, join: .round)
+        Self.outlined(Self.circle(CGPoint(x: 12, y: 2.1), 0.95), structure, in: ctx)
+        let gallery = Path(
+            roundedRect: CGRect(x: 6.4, y: 10.6, width: 11.2, height: 1.9), cornerRadius: 0.95,
+            style: .circular)
+        Self.outlined(gallery, structure, in: ctx)
     }
 
     // MARK: - Eyes
 
-    private func drawEyes(in ctx: GraphicsContext, eyes: LighthouseEyes?, style: Style) {
-        for side in [-1.0, 1.0] as [CGFloat] {
-            let center = CGPoint(x: cx + side * eyeSpacing, y: eyeY)
-            drawEye(in: ctx, eyes: eyes, center: center, side: side, style: style)
+    private func drawEyes(in ctx: GraphicsContext) {
+        let ink = GraphicsContext.Shading.color(LighthousePalette.ink.color)
+        let white = GraphicsContext.Shading.color(LighthousePalette.highlight.color)
+
+        func round(_ cx: CGFloat, y: CGFloat, r: CGFloat, highlight hr: CGFloat, dx: CGFloat, dy: CGFloat) {
+            ctx.fill(Self.circle(CGPoint(x: cx, y: y), r), with: ink)
+            ctx.fill(Self.circle(CGPoint(x: cx + dx, y: y + dy), hr), with: white)
+        }
+        /// A disc cut flat on top.
+        func halfDisc(_ cx: CGFloat, y: CGFloat, r: CGFloat) {
+            let k: CGFloat = 0.5523 * r
+            var p = Path()
+            p.move(to: CGPoint(x: cx - r, y: y))
+            p.addLine(to: CGPoint(x: cx + r, y: y))
+            p.addCurve(
+                to: CGPoint(x: cx, y: y + r), control1: CGPoint(x: cx + r, y: y + k),
+                control2: CGPoint(x: cx + k, y: y + r))
+            p.addCurve(
+                to: CGPoint(x: cx - r, y: y), control1: CGPoint(x: cx - k, y: y + r),
+                control2: CGPoint(x: cx - r, y: y + k))
+            p.closeSubpath()
+            ctx.fill(p, with: ink)
+        }
+        func arc(_ cx: CGFloat, y: CGFloat, controlY: CGFloat) {
+            var p = Path()
+            p.move(to: CGPoint(x: cx - 1.15, y: y))
+            p.addQuadCurve(to: CGPoint(x: cx + 1.15, y: y), control: CGPoint(x: cx, y: controlY))
+            ctx.stroke(p, with: ink, style: Self.line(1.0))
+        }
+
+        for cx in [10.2, 13.8] as [CGFloat] {
+            switch state.eyes {
+            case .open: round(cx, y: 15.8, r: 1.2, highlight: 0.43, dx: 0.43, dy: -0.46)
+            case .wide: round(cx, y: 15.6, r: 1.5, highlight: 0.54, dx: 0.54, dy: -0.57)
+            case .lookingUp: round(cx, y: 15.3, r: 1.2, highlight: 0.45, dx: 0.25, dy: -0.55)
+            case .happy: arc(cx, y: 16.3, controlY: 14.8)
+            case .closed: arc(cx, y: 15.6, controlY: 16.7)
+            case .focused: halfDisc(cx, y: 15.65, r: 1.2)
+            case .sideGlance: halfDisc(cx - 0.45, y: 15.65, r: 1.2)
+            case .dim: halfDisc(cx, y: 15.9, r: 1.0)
+            case .squeezed:
+                // ">" on the left, "<" on the right.
+                let s: CGFloat = cx < 12 ? 1 : -1
+                var p = Path()
+                p.addLines([
+                    CGPoint(x: cx - 0.9 * s, y: 14.8), CGPoint(x: cx + 0.9 * s, y: 15.8),
+                    CGPoint(x: cx - 0.9 * s, y: 16.8),
+                ])
+                ctx.stroke(p, with: ink, style: Self.line(1.0))
+            case .crossed:
+                var p = Path()
+                p.move(to: CGPoint(x: cx - 0.9, y: 14.9))
+                p.addLine(to: CGPoint(x: cx + 0.9, y: 16.7))
+                p.move(to: CGPoint(x: cx + 0.9, y: 14.9))
+                p.addLine(to: CGPoint(x: cx - 0.9, y: 16.7))
+                ctx.stroke(p, with: ink, style: Self.line(1.0))
+            }
         }
     }
 
-    /// `side` is -1 for the left eye, +1 for the right eye.
-    private func drawEye(in ctx: GraphicsContext, eyes: LighthouseEyes?, center c: CGPoint, side: CGFloat, style: Style) {
-        let strokeWidth = max(style.line * 0.95, 0.9)
-        func ellipse(_ w: CGFloat, _ h: CGFloat, at p: CGPoint) -> Path {
-            Path(ellipseIn: CGRect(x: p.x - w / 2, y: p.y - h / 2, width: w, height: h))
-        }
-        func highlight(_ r: CGFloat, at p: CGPoint) {
-            ctx.fill(ellipse(r * 2, r * 2, at: p), with: .color(white))
-        }
+    // MARK: - Beam
 
-        guard let eyes else {
-            // Blink: a short flat line.
-            var p = Path()
-            p.move(to: CGPoint(x: c.x - 1.1, y: c.y + 0.4))
-            p.addLine(to: CGPoint(x: c.x + 1.1, y: c.y + 0.4))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(strokeWidth))
-            return
-        }
-
-        switch eyes {
-        case .open:
-            ctx.fill(ellipse(2.2, 2.6, at: c), with: .color(ink))
-            if style.detailed { highlight(0.42, at: CGPoint(x: c.x + 0.4, y: c.y - 0.5)) }
-
-        case .wide:
-            ctx.fill(ellipse(2.9, 3.3, at: c), with: .color(ink))
-            highlight(style.detailed ? 0.55 : 0.6, at: CGPoint(x: c.x + 0.5, y: c.y - 0.6))
-
-        case .happy:
-            var p = Path()
-            p.move(to: CGPoint(x: c.x - 1.3, y: c.y + 0.7))
-            p.addQuadCurve(to: CGPoint(x: c.x + 1.3, y: c.y + 0.7), control: CGPoint(x: c.x, y: c.y - 1.7))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(strokeWidth))
-
-        case .lookingUp:
-            let p = CGPoint(x: c.x + 0.5, y: c.y - 1.0)
-            ctx.fill(ellipse(2.0, 2.3, at: p), with: .color(ink))
-            if style.detailed { highlight(0.38, at: CGPoint(x: p.x + 0.35, y: p.y - 0.45)) }
-
-        case .focused:
-            // Flat, slanted lid: lower toward the nose.
-            var clip = Path()
-            let outer = -side
-            clip.move(to: CGPoint(x: c.x + outer * 2, y: c.y - 0.85))
-            clip.addLine(to: CGPoint(x: c.x - outer * 2, y: c.y - 0.25))
-            clip.addLine(to: CGPoint(x: c.x - outer * 2, y: c.y + 3))
-            clip.addLine(to: CGPoint(x: c.x + outer * 2, y: c.y + 3))
-            clip.closeSubpath()
-            var clipped = ctx
-            clipped.clip(to: clip)
-            clipped.fill(ellipse(2.5, 2.7, at: CGPoint(x: c.x, y: c.y + 0.1)), with: .color(ink))
-            if style.detailed { highlight(0.36, at: CGPoint(x: c.x + 0.35, y: c.y + 0.35)) }
-
-        case .narrowSideGlance:
-            // Half-lidded, glancing to the viewer's left.
-            let p = CGPoint(x: c.x - 0.7, y: c.y)
-            var clip = Path()
-            clip.addRect(CGRect(x: p.x - 3, y: p.y - 0.15, width: 6, height: 3))
-            var clipped = ctx
-            clipped.clip(to: clip)
-            clipped.fill(ellipse(2.4, 3.0, at: p), with: .color(ink))
-            var lid = Path()
-            lid.move(to: CGPoint(x: c.x - 1.6, y: p.y - 0.15))
-            lid.addLine(to: CGPoint(x: c.x + 1.3, y: p.y - 0.15))
-            ctx.stroke(lid, with: .color(ink), style: style.stroke(strokeWidth * 0.9))
-
-        case .closed:
-            var p = Path()
-            p.move(to: CGPoint(x: c.x - 1.2, y: c.y + 0.1))
-            p.addQuadCurve(to: CGPoint(x: c.x + 1.2, y: c.y + 0.1), control: CGPoint(x: c.x, y: c.y + 1.7))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(strokeWidth))
-
-        case .flat:
-            var p = Path()
-            p.move(to: CGPoint(x: c.x - 1.3, y: c.y + 0.3))
-            p.addLine(to: CGPoint(x: c.x + 1.3, y: c.y + 0.3))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(strokeWidth * 1.05))
-
-        case .crossed:
-            let r: CGFloat = 1.05
-            var p = Path()
-            p.move(to: CGPoint(x: c.x - r, y: c.y - r))
-            p.addLine(to: CGPoint(x: c.x + r, y: c.y + r))
-            p.move(to: CGPoint(x: c.x + r, y: c.y - r))
-            p.addLine(to: CGPoint(x: c.x - r, y: c.y + r))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(strokeWidth * 0.9))
-
-        case .hollow:
-            let ringWidth = max(style.line * 0.7, 0.7)
-            ctx.stroke(ellipse(2.3, 2.3, at: c), with: .color(ink), style: style.stroke(ringWidth))
-        }
+    /// The beam seen from the side: full length to the right at `reach` 1,
+    /// gone at 0, full length to the left at -1.
+    private func drawBeam(in context: GraphicsContext, reach: Double, color: LampColor) {
+        guard abs(reach) > 0.001 else { return }
+        var ctx = context
+        Self.scale(&ctx, x: reach, y: 1, around: Self.lampCenter)
+        var beam = Path()
+        beam.move(to: CGPoint(x: 12, y: 7.6))
+        beam.addLine(to: CGPoint(x: 22.6, y: 5.6))
+        beam.addQuadCurve(to: CGPoint(x: 22.6, y: 11.0), control: CGPoint(x: 23.8, y: 8.3))
+        beam.addLine(to: CGPoint(x: 12, y: 9.0))
+        beam.closeSubpath()
+        ctx.fill(beam, with: .color(LighthousePalette.beam(color).color))
     }
 
     // MARK: - Badges
 
-    /// Center of the badge area, up and to the right of the lamp.
-    private let badgeCenter = CGPoint(x: 20.6, y: 3.8)
+    private func drawBadge(in ctx: GraphicsContext, lamp: LampOutput) {
+        let b = Self.badgeCenter
+        let fill = LighthousePalette.badge(state.badge, lampColor: state.lampColor)
+        let ink = GraphicsContext.Shading.color(LighthousePalette.ink.color)
+        func disc() { Self.outlined(Self.circle(b, 2.9), fill, in: ctx) }
 
-    /// Draws `path` as a white glyph stroke with an ink outline.
-    private func stickerStroke(_ path: Path, in ctx: GraphicsContext, style: Style, weight: CGFloat = 1.4) {
-        let outline = style.line * 0.7
-        ctx.stroke(path, with: .color(ink), style: style.stroke(weight + outline * 2))
-        ctx.stroke(path, with: .color(white), style: style.stroke(weight))
-    }
-
-    private func drawBadge(in ctx: GraphicsContext, style: Style) {
-        let b = badgeCenter
         switch state.badge {
-        case .none, .slash:
+        case .none:
             return
 
-        case .exclamation:
-            var bar = Path()
-            bar.move(to: CGPoint(x: b.x, y: b.y - 2.6))
-            bar.addLine(to: CGPoint(x: b.x, y: b.y + 0.4))
-            stickerStroke(bar, in: ctx, style: style, weight: 1.5)
-            let dot = Path(ellipseIn: CGRect(x: b.x - 0.95, y: b.y + 1.65, width: 1.9, height: 1.9))
-            ctx.fill(dot, with: .color(white))
-            ctx.stroke(dot, with: .color(ink), style: style.stroke(style.line * 0.7 * 2 / 1.4))
-
-        case .check:
-            var p = Path()
-            p.move(to: CGPoint(x: b.x - 2.1, y: b.y + 0.1))
-            p.addLine(to: CGPoint(x: b.x - 0.6, y: b.y + 1.6))
-            p.addLine(to: CGPoint(x: b.x + 2.1, y: b.y - 1.8))
-            stickerStroke(p, in: ctx, style: style)
-
-        case .minus:
-            var p = Path()
-            p.move(to: CGPoint(x: b.x - 2.0, y: b.y))
-            p.addLine(to: CGPoint(x: b.x + 2.0, y: b.y))
-            stickerStroke(p, in: ctx, style: style, weight: 1.5)
-
-        case .plus:
-            var p = Path()
-            p.move(to: CGPoint(x: b.x - 2.0, y: b.y - 0.4))
-            p.addLine(to: CGPoint(x: b.x + 2.0, y: b.y - 0.4))
-            p.move(to: CGPoint(x: b.x, y: b.y - 2.4))
-            p.addLine(to: CGPoint(x: b.x, y: b.y + 1.6))
-            stickerStroke(p, in: ctx, style: style)
-
         case .sleepZ:
-            var z = Path()
-            z.move(to: CGPoint(x: b.x - 1.6, y: b.y - 1.7))
-            z.addLine(to: CGPoint(x: b.x + 1.6, y: b.y - 1.7))
-            z.addLine(to: CGPoint(x: b.x - 1.6, y: b.y + 1.7))
-            z.addLine(to: CGPoint(x: b.x + 1.6, y: b.y + 1.7))
-            stickerStroke(z, in: ctx, style: style, weight: 1.2)
-            if style.detailed {
-                // A smaller second "z" drifting off.
-                let o = CGPoint(x: b.x - 3.4, y: b.y + 3.0)
-                var small = Path()
-                small.move(to: CGPoint(x: o.x - 0.8, y: o.y - 0.85))
-                small.addLine(to: CGPoint(x: o.x + 0.8, y: o.y - 0.85))
-                small.addLine(to: CGPoint(x: o.x - 0.8, y: o.y + 0.85))
-                small.addLine(to: CGPoint(x: o.x + 0.8, y: o.y + 0.85))
-                stickerStroke(small, in: ctx, style: style, weight: 0.7)
-            }
+            drawSleepZ(in: ctx, fill: fill)
 
         case .sparkle:
-            let r: CGFloat = 3.2
-            let k: CGFloat = 0.45
             var p = Path()
-            p.move(to: CGPoint(x: b.x, y: b.y - r))
-            p.addQuadCurve(to: CGPoint(x: b.x + r, y: b.y), control: CGPoint(x: b.x + k, y: b.y - k))
-            p.addQuadCurve(to: CGPoint(x: b.x, y: b.y + r), control: CGPoint(x: b.x + k, y: b.y + k))
-            p.addQuadCurve(to: CGPoint(x: b.x - r, y: b.y), control: CGPoint(x: b.x - k, y: b.y + k))
-            p.addQuadCurve(to: CGPoint(x: b.x, y: b.y - r), control: CGPoint(x: b.x - k, y: b.y - k))
+            p.move(to: CGPoint(x: 0, y: -2.6))
+            p.addQuadCurve(to: CGPoint(x: 2.6, y: 0), control: CGPoint(x: 0.5, y: -0.5))
+            p.addQuadCurve(to: CGPoint(x: 0, y: 2.6), control: CGPoint(x: 0.5, y: 0.5))
+            p.addQuadCurve(to: CGPoint(x: -2.6, y: 0), control: CGPoint(x: -0.5, y: 0.5))
+            p.addQuadCurve(to: CGPoint(x: 0, y: -2.6), control: CGPoint(x: -0.5, y: -0.5))
             p.closeSubpath()
-            ctx.fill(p, with: .color(white))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(style.line * 0.8))
+            Self.outlined(p.offsetBy(dx: b.x, dy: b.y), fill, in: ctx, width: 1.36, join: .round)
 
         case .thoughtDots:
-            let dots: [(CGFloat, CGFloat, CGFloat)] = [(16.9, 5.4, 0.85), (19.1, 3.6, 1.2), (21.8, 1.9, 1.6)]
-            for (x, y, r) in dots {
-                let p = Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
-                ctx.fill(p, with: .color(white))
-                ctx.stroke(p, with: .color(ink), style: style.stroke(style.line * 0.6))
+            disc()
+            for x in [2.7, 3.9, 5.1] as [CGFloat] {
+                ctx.fill(Self.circle(CGPoint(x: x, y: 4.3), 0.55), with: ink)
             }
 
-        case .triangle:
+        case .count:
+            disc()
+            let text: String
+            switch sessionCount {
+            case .some(let n) where n > 9: text = "9+"
+            case .some(let n) where n > 0: text = String(n)
+            default: text = "+"
+            }
+            if let glyph = LighthouseGlyphs.count(text) {
+                ctx.fill(glyph.path.offsetBy(dx: b.x - glyph.advance / 2, dy: 5.8), with: ink)
+            }
+
+        case .exclamation:
+            // Blinks with the lamp (Q).
+            guard lamp.isOn else { return }
+            disc()
+            ctx.fill(
+                Path(
+                    roundedRect: CGRect(x: 3.35, y: 2.4, width: 1.1, height: 2.4), cornerRadius: 0.5,
+                    style: .circular), with: ink)
+            ctx.fill(Self.circle(CGPoint(x: 3.9, y: 5.65), 0.6), with: ink)
+
+        case .check:
+            disc()
             var p = Path()
-            p.move(to: CGPoint(x: b.x, y: b.y - 3.1))
-            p.addLine(to: CGPoint(x: b.x + 3.2, y: b.y + 2.4))
-            p.addLine(to: CGPoint(x: b.x - 3.2, y: b.y + 2.4))
-            p.closeSubpath()
-            ctx.fill(p, with: .color(white))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(style.line * 0.85))
-            var mark = Path()
-            mark.move(to: CGPoint(x: b.x, y: b.y - 0.9))
-            mark.addLine(to: CGPoint(x: b.x, y: b.y + 0.4))
-            mark.move(to: CGPoint(x: b.x, y: b.y + 1.35))
-            mark.addLine(to: CGPoint(x: b.x, y: b.y + 1.36))
-            ctx.stroke(mark, with: .color(ink), style: style.stroke(max(style.line * 0.75, 0.75)))
+            p.addLines([CGPoint(x: 2.6, y: 4.4), CGPoint(x: 3.5, y: 5.3), CGPoint(x: 5.3, y: 3.4)])
+            ctx.stroke(p, with: ink, style: Self.line(0.95))
+
+        case .cross:
+            disc()
+            var p = Path()
+            p.move(to: CGPoint(x: 2.9, y: 3.3))
+            p.addLine(to: CGPoint(x: 4.9, y: 5.3))
+            p.move(to: CGPoint(x: 4.9, y: 3.3))
+            p.addLine(to: CGPoint(x: 2.9, y: 5.3))
+            ctx.stroke(p, with: ink, style: Self.line(0.95))
+
+        case .triangle:
+            let p = Self.polygon([CGPoint(x: 3.9, y: 1.5), CGPoint(x: 6.9, y: 6.7), CGPoint(x: 0.9, y: 6.7)])
+            Self.outlined(p, fill, in: ctx, join: .round)
+            ctx.fill(
+                Path(
+                    roundedRect: CGRect(x: 3.4, y: 3.3, width: 1.0, height: 1.9), cornerRadius: 0.4,
+                    style: .circular), with: ink)
+            ctx.fill(Self.circle(CGPoint(x: 3.9, y: 5.8), 0.5), with: ink)
 
         case .bolt:
-            var p = Path()
-            p.move(to: CGPoint(x: b.x + 0.4, y: b.y - 3.4))
-            p.addLine(to: CGPoint(x: b.x + 2.4, y: b.y - 3.4))
-            p.addLine(to: CGPoint(x: b.x + 1.0, y: b.y - 0.6))
-            p.addLine(to: CGPoint(x: b.x + 2.6, y: b.y - 0.6))
-            p.addLine(to: CGPoint(x: b.x - 1.4, y: b.y + 3.8))
-            p.addLine(to: CGPoint(x: b.x - 0.4, y: b.y + 0.7))
-            p.addLine(to: CGPoint(x: b.x - 2.2, y: b.y + 0.7))
-            p.closeSubpath()
-            ctx.fill(p, with: .color(white))
-            ctx.stroke(p, with: .color(ink), style: style.stroke(style.line * 0.7))
+            let p = Self.polygon([
+                CGPoint(x: 4.7, y: 1.3), CGPoint(x: 1.9, y: 4.9), CGPoint(x: 3.9, y: 4.9),
+                CGPoint(x: 3.0, y: 7.7), CGPoint(x: 6.1, y: 3.9), CGPoint(x: 4.1, y: 3.9),
+            ])
+            Self.outlined(p, fill, in: ctx, join: .round)
+
+        case .question:
+            disc()
+            let glyph = LighthouseGlyphs.question
+            ctx.fill(glyph.path.offsetBy(dx: b.x - glyph.advance / 2, dy: 5.85), with: ink)
         }
     }
 
-    /// Disconnected: a slash across the dark lantern.
-    private func drawLanternSlash(in ctx: GraphicsContext, style: Style) {
-        var p = Path()
-        p.move(to: CGPoint(x: cx - 4.4, y: lanternBottom + 0.6))
-        p.addLine(to: CGPoint(x: cx + 4.4, y: lanternTop - 0.9))
-        stickerStroke(p, in: ctx, style: style, weight: 1.1)
+    /// Two "z" letters to the right of the roof, rising and fading as on the canvas.
+    private func drawSleepZ(in context: GraphicsContext, fill: LighthouseRGB) {
+        let frame = sleepZ
+        guard frame.opacity > 0 else { return }
+        var ctx = context
+        ctx.opacity = frame.opacity
+        ctx.translateBy(x: 0, y: frame.offsetY)
+        // One layer, so the fade applies to each letter as a whole.
+        ctx.drawLayer { layer in
+            let letters: [(LighthouseGlyphs.Run, CGPoint, CGFloat)] = [
+                (LighthouseGlyphs.bigZ, CGPoint(x: 17.4, y: 5.6), 0.9),
+                (LighthouseGlyphs.smallZ, CGPoint(x: 20.2, y: 3.0), 0.8),
+            ]
+            for (glyph, origin, width) in letters {
+                Self.outlined(glyph.path.offsetBy(dx: origin.x, dy: origin.y), fill, in: layer, width: width)
+            }
+        }
+    }
+}
+
+/// Letter outlines for the badges, in drawing units with the baseline at
+/// y = 0 and the pen starting at x = 0 (SVG `<text>` placement).
+enum LighthouseGlyphs {
+    struct Run: Sendable {
+        let path: Path
+        let advance: CGFloat
+    }
+
+    static let bigZ = make("z", size: 4.2, weight: .heavy)
+    static let smallZ = make("z", size: 3.0, weight: .heavy)
+    static let question = make("?", size: 4.3, weight: .bold)
+    private static let counts: [String: Run] = {
+        var runs: [String: Run] = [
+            "+": make("+", size: 4.1, weight: .bold),
+            "9+": make("9+", size: 3.2, weight: .bold),
+        ]
+        for n in 1...9 { runs[String(n)] = make(String(n), size: 4.1, weight: .bold) }
+        return runs
+    }()
+
+    static func count(_ text: String) -> Run? { counts[text] }
+
+    private static func make(_ text: String, size: CGFloat, weight: NSFont.Weight) -> Run {
+        let font = NSFont.systemFont(ofSize: size, weight: weight) as CTFont
+        let characters = Array(text.utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+        CTFontGetGlyphsForCharacters(font, characters, &glyphs, characters.count)
+        var advances = [CGSize](repeating: .zero, count: glyphs.count)
+        CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advances, glyphs.count)
+        var path = Path()
+        var x: CGFloat = 0
+        for (glyph, advance) in zip(glyphs, advances) {
+            // Core Text draws y-up; flip to the drawing's y-down.
+            var transform = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: x, ty: 0)
+            if let outline = CTFontCreatePathForGlyph(font, glyph, &transform) {
+                path.addPath(Path(outline))
+            }
+            x += advance.width
+        }
+        return Run(path: path, advance: x)
     }
 }

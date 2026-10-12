@@ -6,3 +6,5 @@
 .swiftpm/
 *.xcodeproj/xcuserdata/
 .DS_Store
+# Python bytecode of the e2e scripts
+__pycache__/

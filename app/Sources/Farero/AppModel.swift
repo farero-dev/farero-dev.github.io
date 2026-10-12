@@ -37,6 +37,8 @@ final class AppModel {
     var pluginActivity: [String: PluginActivity] = [:]
     /// What the daemon version check did (shown in 데몬 상태).
     var versionNotice: String?
+    /// The selected tab of 설정, so the menu can open it on Claude Code.
+    var settingsTab = SettingsTab.initial
 
     var mode: NotchMode { NotchMode.resolve(state, hovering: hovering, pinned: pinned) }
 
@@ -47,12 +49,17 @@ final class AppModel {
     @ObservationIgnored var updateTask: Task<Void, Never>?
     @ObservationIgnored var reregistration = ReregistrationState.idle
     @ObservationIgnored var openedPromptURLs: Set<String> = []
+    /// An `agentcfg.status` fetch is in flight / another snapshot asked for one meanwhile.
+    @ObservationIgnored var agentCfgFetching = false
+    @ObservationIgnored var agentCfgFetchAgain = false
     /// AppKit controllers that follow the state (status item, panel).
     @ObservationIgnored var onChange: [() -> Void] = []
 
     @ObservationIgnored private var characterTimer: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// A terminal jump is in flight.
+    @ObservationIgnored private var jumping = false
     @ObservationIgnored private var inputTextCache: [String: ApprovalPresentation.InputDisplay] = [:]
 
     init(socketPath: String = IPCClient.defaultSocketPath()) {
@@ -61,25 +68,91 @@ final class AppModel {
         hotKeys.onPress = { [weak self] shortcut in self?.answerFront(shortcut) }
         if Self.debug {
             hotKeys.debugLog = { FileHandle.standardError.write(Data("farero: \($0)\n".utf8)) }
-            installDebugSignals()
+            if let path = ProcessInfo.processInfo.environment["FARERO_DEBUG_CONTROL"], !path.isEmpty {
+                startDebugControl(path: path)
+            }
         }
     }
 
-    @ObservationIgnored private var signalSources: [DispatchSourceSignal] = []
+    /// Development aid (FARERO_DEBUG=1, FARERO_DEBUG_CONTROL=<named pipe>):
+    /// scripts/e2e-notch.py drives the notch through the pipe, one command
+    /// per line, without synthesizing input (that needs Accessibility):
+    ///   pin                              toggles the pinned (expanded) island
+    ///   hotkey allow|allow_session|deny  sends the shortcut's hot-key event
+    ///                                    to the app, as a key press does
+    ///   jump <session-id>                jumps to the session's terminal, as
+    ///                                    tapping its row does; logs
+    ///                                    `jump <id> tty=<tty>: jumped|notFound|failed <message>`
+    ///   logsearch <text…>                runs the log window's search for the
+    ///                                    text (spaces and Korean allowed); logs
+    ///                                    `logsearch "<text>" mode=<label> results=<n>`
+    ///                                    or `logsearch "<text>" error <message>`
+    /// Every command logs `control <command>: done|ignored`; the results of
+    /// jump and logsearch follow when they finish.
+    private func startDebugControl(path: String) {
+        // The model lives as long as the app. A strong capture keeps these
+        // closures Sendable; Swift 6.1 rejects sending a weak `self` (a
+        // mutable capture) from this thread to the main actor.
+        let model = self
+        let thread = Thread {
+            while true {
+                // Opening a pipe blocks until a writer opens it; reading ends
+                // when that writer closes it.
+                guard let handle = FileHandle(forReadingAtPath: path) else {
+                    FileHandle.standardError.write(Data("farero: cannot open debug control \(path)\n".utf8))
+                    return
+                }
+                let data = handle.readDataToEndOfFile()
+                try? handle.close()
+                for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
+                    let command = String(line).trimmingCharacters(in: .whitespaces)
+                    DispatchQueue.main.async { MainActor.assumeIsolated { model.debugCommand(command) } }
+                }
+            }
+        }
+        thread.name = "farero debug control"
+        thread.start()
+    }
 
-    /// Development aids (FARERO_DEBUG=1): SIGUSR1 toggles the pinned
-    /// (expanded) notch, SIGUSR2 denies the front card through the same
-    /// path the ⌃⌥N shortcut uses.
-    private func installDebugSignals() {
-        signal(SIGUSR1, SIG_IGN)
-        signal(SIGUSR2, SIG_IGN)
-        let pin = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
-        pin.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.togglePinned() } }
-        let deny = DispatchSource.makeSignalSource(signal: SIGUSR2, queue: .main)
-        deny.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.answerFront(.deny) } }
-        for source in [pin, deny] {
-            source.resume()
-            signalSources.append(source)
+    private func debugCommand(_ command: String) {
+        let words = command.split(separator: " ").map(String.init)
+        var done = false
+        switch words.first {
+        case "pin":
+            togglePinned()
+            done = true
+        case "hotkey":
+            if words.count == 2, let s = ApprovalShortcut.allCases.first(where: { $0.answer.rawValue == words[1] }) {
+                done = hotKeys.sendDebugPress(s)
+            }
+        case "jump":
+            if words.count == 2, let s = state.sessions[words[1]], !jumping {
+                Task { await jump(to: s) }
+                done = true
+            }
+        case "logsearch":
+            let text = command.dropFirst("logsearch".count).trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty {
+                Task { await debugLogSearch(text) }
+                done = true
+            }
+        default:
+            break
+        }
+        FileHandle.standardError.write(Data("farero: control \(command): \(done ? "done" : "ignored")\n".utf8))
+    }
+
+    /// The log window's search (LogSearchModel) for `text`, with its result
+    /// on stderr.
+    private func debugLogSearch(_ text: String) async {
+        let search = LogSearchModel(app: self)
+        search.filter.query = text
+        await search.search()
+        if let error = search.error {
+            debugLog("logsearch \"\(text)\" error \(error)")
+        } else {
+            let mode = LogFilter.searchModeLabel(search.filter.query) ?? "-"
+            debugLog("logsearch \"\(text)\" mode=\(mode) results=\(search.calls.count)")
         }
     }
 
@@ -151,6 +224,7 @@ final class AppModel {
         guard let approval = state.approvals.first(where: { $0.id == approvalID }),
               state.answering[approvalID] == nil else { return }
         if answer == .allowSession && !approval.allowSession { return }
+        debugLog("answer \(approvalID) \(answer.rawValue)")
         dispatch(.answerSent(approvalID: approvalID, answer: answer))
         let client = self.client
         Task { [weak self] in
@@ -170,6 +244,7 @@ final class AppModel {
 
     /// A global shortcut acts on the front (oldest) card.
     func answerFront(_ shortcut: ApprovalShortcut) {
+        debugLog("shortcut \(shortcut.hint)")
         guard let front = state.frontApproval else { return }
         answer(front.id, shortcut.answer)
     }
@@ -200,35 +275,55 @@ final class AppModel {
             guard !Task.isCancelled, let self else { return }
             self.hoverTask = nil
             self.hovering = inside
+            self.debugLog("hover \(inside)")
             for f in self.onChange { f() }
         }
     }
 
     func togglePinned() {
         pinned.toggle()
+        debugLog("pinned \(pinned)")
         for f in onChange { f() }
     }
 
     func unpin() {
         guard pinned else { return }
         pinned = false
+        debugLog("pinned false")
         for f in onChange { f() }
     }
 
     // MARK: - Terminal jump (F-11)
 
-    func jump(to session: Session) {
-        switch TerminalJumper.jump(tty: session.tty) {
-        case .jumped:
-            pinned = false
-        case .notFound:
-            showToast(TerminalJumper.notFoundMessage)
-        case .failed(let message):
-            showToast(message)
+    /// Brings the session's Terminal tab to the front; on success the
+    /// pinned island closes, otherwise the notch shows why. A request while
+    /// another jump is in flight (the Automation consent dialog may be up)
+    /// is ignored and returns nil.
+    @discardableResult
+    func jump(to session: Session) async -> TerminalJump.Outcome? {
+        guard !jumping else {
+            debugLog("jump \(session.id) tty=\(session.tty): busy")
+            return nil
         }
+        jumping = true
+        defer { jumping = false }
+        let outcome = await TerminalJumper.jump(tty: session.tty) { [weak self] in self?.debugLog($0) }
+        let result = switch outcome {
+        case .jumped: "jumped"
+        case .notFound: "notFound"
+        case .failed(let message): "failed \(message)"
+        }
+        debugLog("jump \(session.id) tty=\(session.tty): \(result)")
+        if let message = outcome.message {
+            showToast(message)
+        } else {
+            unpin()
+        }
+        return outcome
     }
 
     func showToast(_ message: String) {
+        debugLog("toast \(message)")
         toast = message
         toastTask?.cancel()
         toastTask = Task { [weak self] in

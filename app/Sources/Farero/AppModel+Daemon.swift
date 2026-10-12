@@ -32,6 +32,7 @@ extension AppModel {
         case .stateSnapshot(let snap):
             Task { await refreshDaemonSettings() }
             checkDaemonVersion(snap.version)
+            fetchAgentCfgStatus()
         case .pluginPrompt(let p):
             // Open the browser only for a flow the user started here.
             if pluginActivity[p.plugin]?.connecting == true, !openedPromptURLs.contains(p.url),
@@ -63,17 +64,22 @@ extension AppModel {
               case .settings(let s) = reply.payload else { return }
         let firstLoad = daemonSettings == nil
         daemonSettings = s
-        if firstLoad { startUpdateChecks() }
+        if firstLoad, s.updateCheck { startUpdateChecks() }
     }
 
     /// Saves daemon settings and returns an error message on failure.
+    /// Turning the update check off drops the "새 버전" item at once.
     func saveDaemonSettings(_ s: DaemonSettings) async -> String? {
         do {
             let reply = try await client.request(MessageType.settingsSet, s)
             if case .settings(let saved) = reply.payload {
-                let turnedOn = saved.updateCheck && daemonSettings?.updateCheck == false
+                let was = daemonSettings?.updateCheck
                 daemonSettings = saved
-                if turnedOn { Task { await checkForUpdate() } }
+                if saved.updateCheck, was == false {
+                    startUpdateChecks()
+                } else if !saved.updateCheck {
+                    stopUpdateChecks()
+                }
             }
             return nil
         } catch {
@@ -81,9 +87,15 @@ extension AppModel {
         }
     }
 
+    /// Whether this build checks GitHub at all: a release version, not a
+    /// dev build or a development run (Q41).
+    static var updateCheckable: Bool {
+        UpdateCheck.isCheckable(currentVersion: appVersion, environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Checks now and then every 24 hours while the setting is on.
     func startUpdateChecks() {
-        guard updateTask == nil, UpdateCheck.isCheckable(currentVersion: Self.appVersion) else { return }
+        guard updateTask == nil, Self.updateCheckable else { return }
         updateTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.checkForUpdate()
@@ -92,11 +104,19 @@ extension AppModel {
         }
     }
 
+    func stopUpdateChecks() {
+        updateTask?.cancel()
+        updateTask = nil
+        guard availableUpdate != nil else { return }
+        availableUpdate = nil
+        for f in onChange { f() }
+    }
+
     /// One GET to the GitHub releases API: the only request the app itself
     /// makes. A 404 (no release yet) is not an error.
     func checkForUpdate() async {
         guard daemonSettings?.updateCheck == true, let current = Self.appVersion,
-              UpdateCheck.isCheckable(currentVersion: current) else { return }
+              Self.updateCheckable else { return }
         var req = URLRequest(url: UpdateCheck.latestReleaseURL, timeoutInterval: 20)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("farero/\(current)", forHTTPHeaderField: "User-Agent")
@@ -111,13 +131,46 @@ extension AppModel {
         for f in onChange { f() }
     }
 
+    // MARK: - Claude Code registration (F-06)
+
+    /// Fetches `agentcfg.status` after a snapshot, so an outdated Claude Code
+    /// shows in the menu without opening 설정. One request at a time: a
+    /// snapshot that arrives meanwhile (farerod re-sends one once its
+    /// gateway starts) queues a single follow-up.
+    func fetchAgentCfgStatus() {
+        guard !agentCfgFetching else {
+            agentCfgFetchAgain = true
+            return
+        }
+        agentCfgFetching = true
+        let client = self.client
+        Task { [weak self] in
+            let reply = try? await client.request(MessageType.agentCfgStatus, AgentRef())
+            guard let self else { return }
+            if let reply { dispatch(.ipc(.message(reply))) }
+            agentCfgFetching = false
+            if agentCfgFetchAgain {
+                agentCfgFetchAgain = false
+                fetchAgentCfgStatus()
+            }
+        }
+    }
+
+    /// Takes an `agentcfg.*` reply the Claude Code panel asked for. The panel
+    /// shows the reply's `message`, so the notice counts as seen.
+    func receiveAgentCfgReply(_ reply: IncomingMessage) {
+        dispatch(.ipc(.message(reply)))
+        dispatch(.agentCfgNoticeSeen)
+    }
+
     // MARK: - Version mismatch (아키텍처 16장)
 
     /// A bundled app talking to a farerod of another version re-registers
     /// it once, after the approval queue is empty, so launchd starts the
-    /// daemon from the current bundle.
+    /// daemon from the current bundle. A translocated app leaves the
+    /// installed daemon alone.
     func checkDaemonVersion(_ daemonVersion: String) {
-        guard reregistration != .done, DaemonRegistrar.skipReason() == nil else { return }
+        guard reregistration != .done, DaemonRegistrar.skipReason() == nil, !DaemonRegistrar.isTranslocated else { return }
         let app = Self.appVersion
         guard DaemonVersionCheck.needsReregistration(appVersion: app, daemonVersion: daemonVersion) else {
             reregistration = .idle

@@ -59,7 +59,44 @@ func New(version, secret string, caller Caller, log *slog.Logger) *Gateway {
 		Instructions: "Tools from services connected in farero. Some calls need the user's approval in the farero app; a refused call returns an error that says why.",
 		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
 	})
+	s.AddReceivingMiddleware(logRequests(log))
 	return &Gateway{server: s, caller: caller, secret: secret, log: log, tools: map[string]string{}}
+}
+
+// logRequests logs which protocol agents speak and when they (re)read the
+// tool list. Connection setup is rare and worth keeping in the normal log;
+// everything else is debug.
+func logRequests(log *slog.Logger) mcp.Middleware {
+	type versioned interface {
+		ProtocolVersion() string
+		ClientInfo() *mcp.Implementation
+	}
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			attrs := []any{"method", method}
+			if p, ok := req.GetParams().(*mcp.InitializeParams); ok && p != nil {
+				attrs = append(attrs, "protocol", p.ProtocolVersion)
+				if p.ClientInfo != nil {
+					attrs = append(attrs, "client", p.ClientInfo.Name+" "+p.ClientInfo.Version)
+				}
+			} else if v, ok := req.(versioned); ok {
+				attrs = append(attrs, "protocol", v.ProtocolVersion())
+				if ci := v.ClientInfo(); ci != nil {
+					attrs = append(attrs, "client", ci.Name+" "+ci.Version)
+				}
+			}
+			if ex := req.GetExtra(); ex != nil && ex.Header != nil {
+				attrs = append(attrs, "conn", ex.Header.Get(ConnHeader))
+			}
+			switch method {
+			case "initialize", "server/discover", "subscriptions/listen":
+				log.Info("mcp request", attrs...)
+			default:
+				log.Debug("mcp request", attrs...)
+			}
+			return next(ctx, method, req)
+		}
+	}
 }
 
 // SetTools replaces the exposed tool set. Unchanged tools are left alone so
@@ -131,14 +168,49 @@ func (g *Gateway) ToolNames() []string {
 	return out
 }
 
+// latestProtocol is MCP 2026-07-28, the version the gateway is built for
+// (기능 명세서 5-6). It has no sessions: every request names its protocol
+// version in the Mcp-Protocol-Version header.
+const latestProtocol = "2026-07-28"
+
+// maxRequestBody bounds one MCP request. The SDK default (4 MiB) is too
+// small for tool inputs that carry files, such as Resend's send-email with
+// base64 attachments (up to 40 MB per email). Requests come from local,
+// authenticated agents only.
+const maxRequestBody = 64 << 20
+
 // Handler returns the HTTP handler: auth and Origin checks around the MCP
-// Streamable HTTP handler, served at /mcp.
+// Streamable HTTP handlers, served at /mcp.
+//
+// The SDK serves 2026-07-28 only from a stateless handler, and a stateless
+// handler gives initialize-based clients no session, so they would miss
+// tools/list_changed. Agents may speak either (Claude Code tries
+// server/discover first and falls back to initialize, M0), so requests are
+// routed: 2026-07-28 to a stateless handler, everything else (initialize,
+// requests with Mcp-Session-Id, the GET notification stream) to a stateful
+// one. Both serve the same server.
 func (g *Gateway) Handler() http.Handler {
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return g.server }, &mcp.StreamableHTTPOptions{
-		Logger: g.log,
+	getServer := func(*http.Request) *mcp.Server { return g.server }
+	legacy := mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{
+		Logger:              g.log,
+		MaxRequestBodyBytes: maxRequestBody,
+	})
+	latest := mcp.NewStreamableHTTPHandler(getServer, &mcp.StreamableHTTPOptions{
+		Logger:              g.log,
+		MaxRequestBodyBytes: maxRequestBody,
+		Stateless:           true,
+		// The POST is the whole request: when the agent drops it (Esc), the
+		// call must end so its approval card is withdrawn.
+		PropagateRequestCancellation: true,
 	})
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/mcp", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Mcp-Session-Id") == "" && r.Header.Get("Mcp-Protocol-Version") >= latestProtocol {
+			latest.ServeHTTP(w, r)
+			return
+		}
+		legacy.ServeHTTP(w, r)
+	}))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Origin") != "" {
 			http.Error(w, "browser requests are not allowed", http.StatusForbidden)

@@ -28,19 +28,25 @@ go generate ./internal/policy                         # re-copy policy/default.j
 go vet ./...
 ```
 
+End-to-end checks with a real, interactive Claude Code (headless pseudo-terminals, an isolated Claude config dir, a dev farerod under `/tmp`; they take several minutes): `scripts/e2e-sessions.py` (M2 session watching), `scripts/e2e-approvals.py` (M3 agent tool approval; `E2E_APPROVAL_TIMEOUT=10m` for the real deadline), `scripts/e2e-gateway.py` (M4 gateway with the fake `dev` plugin; `E2E_APPROVAL_TIMEOUT=3m` or `10m` runs only the long-wait steps), `scripts/e2e-plugins.py` (M5 with the real GitHub, Railway and Resend; it keeps the plugin tokens in `E2E_DIR`, default `/tmp/frm5`, connects a missing plugin interactively, writes issues to the private repo `farero-dev/farero-e2e`, redeploys the service `whoami` of the Railway project `farero-e2e`, and sends a mail from `onboarding@resend.dev` to Resend's test inbox `delivered@resend.dev`), `scripts/e2e-notch.py` (M6 notch UI with the real `build/Farero.app` answering the cards; it shares `E2E_DIR` with e2e-plugins for scenario B, drives the app through the debug control pipe `FARERO_DEBUG_CONTROL` because posting key events needs Accessibility, and `E2E_MANUAL=1` asks a person to press ⌃⌥Y/S/N and click instead), `scripts/e2e-m7.py` (M7: scenario E with claude sessions in new Terminal.app windows it opens and closes, `jump <session>` on the control pipe; Korean log search through farerod and the app, tool levels, the result limit, session delete; `E2E_DIR` default `/tmp/frm7`; `E2E_MANUAL=1` starts the app with `open` so a person answers its Automation prompt), `scripts/e2e.sh` (`claude -p` through the gateway). The shared harness is `scripts/e2elib.py`. `farero-devctl` stands in for the app (watch, answer cards, log, `policy set`, `plugin connect|tools|option`, `settings [limit <bytes>|update on|off]`, `session delete <id>`).
+
+Release: `scripts/build.sh <version>` builds the Universal, ad-hoc signed `build/Farero.app` and `build/Farero-<version>.zip`; `scripts/make-icon.sh` regenerates `app/Resources/AppIcon.icns` from LighthouseKit. Pushing a tag `v*` runs `.github/workflows/release.yml` (a tag with `-`, such as `v0.1.0-beta.1`, becomes a prerelease). `docs/release-checklist.md` is the release procedure and the clean-account check of scenarios A–E. `scripts/release-check.sh <step>` runs in that clean account and only reads: it checks the install, the Claude Code registration and the audit log rows of scenarios A–D, and appends its results to `/Users/Shared/farero-check-<user>.md`, which the developer account can read.
+
 `experiments/` is a separate Go module (`cd experiments && go build -o bin/<name> ./<dir>`). It holds M0 throwaway code and must never be imported by `daemon/` (Q67).
 
 ## Architecture
 
 There are three processes. All state lives in the daemon (Q40):
 
-- **`farerod`** (Go, `daemon/cmd/farerod`): a LaunchAgent registered by the app through `SMAppService`. It owns sessions, the approval broker, the policy engine, the MCP gateway (Streamable HTTP on `127.0.0.1:<port fixed on first run>`), upstream plugin connections, SQLite and Keychain.
+- **`farerod`** (Go, `daemon/cmd/farerod`): a user LaunchAgent (`~/Library/LaunchAgents/dev.farero.farerod.plist`) that the app writes and loads with `launchctl`. Not `SMAppService`: with ad-hoc signing it ties the job to farerod's code hash, and launchd refuses the farerod of every updated bundle. It owns sessions, the approval broker, the policy engine, the MCP gateway (Streamable HTTP on `127.0.0.1:<port fixed on first run>`), upstream plugin connections, SQLite and Keychain.
 - **`farero-hook`** (Go, `daemon/cmd/farero-hook`): Claude Code runs it for every hook event (`farero-hook --agent claude`) and as the MCP `headersHelper` (`--headers`). It forwards to `farerod` over the Unix socket. If the socket is unreachable it exits 0 with no output, so the agent is never blocked.
 - **App** (Swift, `app/`, planned as a SwiftPM package): a UI client of `farerod` over the same socket. It handles the notch and menu bar, approval cards, settings, log search and terminal jump.
 
 IPC uses JSON Lines over `~/Library/Application Support/Farero/farerod.sock` (mode 0600). Every message is `{"type","id","data"}`. The JSON field names in `daemon/internal/model` are the IPC contract the Swift app decodes, so renaming one is a protocol change.
 
-Planned module layout under `daemon/internal/`: `ipc`, `session`, `broker`, `policy`, `correlate`, `gateway`, `upstream`, `auth`, `store`, `secret`, `agentcfg`. These exist today: `model`, `paths`, `store`, `policy`.
+Packages under `daemon/internal/`: `core` (wires everything; the socket server), `ipc`, `session`, `broker`, `policy`, `correlate`, `gateway`, `upstream`, `plugins`, `auth`, `store`, `secret`, `agentcfg`, `model`, `paths`.
+
+farerod opens its socket before anything reads the Keychain (gateway secret, plugin tokens). With ad-hoc signing every update asks for Keychain access again; until the user answers, the app and the hooks still reach farerod, and it re-sends `state.snapshot` once the gateway is up.
 
 ### Policy (기능 명세서 6장, `internal/policy`)
 
@@ -59,16 +65,29 @@ MCP requests carry no session id, and the `headersHelper` environment does not i
 
 ### Storage (`internal/store`)
 
-SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows. Call results are truncated to 16KB (Q46).
+SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows; a tainted one leaves a `deleted_taint` tombstone so the session comes back tainted if its agent is still running or resumed (Q39). Call results are truncated to the `log.result_limit` setting, 16KB by default, 1KB–1MB (Q46).
 
-## Facts verified in M0 that constrain the code
+## Facts verified in M0 and M2–M5 that constrain the code
 
 - Without a per-server `timeout` in the MCP server entry, Claude Code gives up on a tool call after about 60 s. Register the gateway with `timeout: 660000` so a 10-minute approval can finish. Hook entries use `timeout: 660`.
 - `claude mcp add-json farero '<json>' --scope user` accepts `headersHelper` and `timeout`, so Claude Code writes its own `~/.claude.json` and farero does not have to edit that file by hand.
-- Claude Code 2.1.287 first tries `server/discover` (2026-07-28) and then falls back to `initialize` (2025-11-25). The gateway must serve both, which the Go SDK does.
+- The gateway serves MCP 2026-07-28 and the initialize-based versions (기능 명세서 5-6). Go MCP SDK v1.8.0 serves 2026-07-28 only from a stateless handler, which gives initialize clients no session (no `tools/list_changed`), so `internal/gateway` routes by header between a stateless and a stateful handler on the same server. Claude Code 2.1.293 uses `server/discover` + `subscriptions/listen` (2026-07-28) and re-reads `tools/list` within 0.05 s of a change; with the old SDK it fell back to `initialize` 2025-11-25.
+- Claude Code moves an MCP call still running after 120 s to the background (`CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS`, off in `-p`): PostToolUse and Stop arrive while the approval card is still open, and the answer reaches the model later as a `<task-notification>` turn. farero keeps Claude Code's default (Q83). A session shows `waiting_approval` while it has an open card, whatever its hook events say (`session.ApprovalOpened/Closed`).
+- The headersHelper runs once per claude process; its connection id stays the same for the whole session, also across a farerod restart (Claude Code reopens `subscriptions/listen` on it and does not run the helper again).
 - `PermissionRequest` does not fire for tools matched by `permissions.allow` (`mcp__farero__*`). It fires after `PreToolUse`.
 - Items written by `zalando/go-keyring` can be read by any process through `/usr/bin/security` without a prompt. So `secret` uses the Security framework (cgo), and only `farerod` touches Keychain. The hook gets the gateway secret over the socket (`headers.issue`).
 - Other apps can register their own `PermissionRequest` hooks in user settings, and their answer can override farero's.
+- `PermissionRequest` has no `tool_use_id`; the `PreToolUse` just before it (same tool and input) and the tool's `PostToolUse(Failure)` do. When the user allows at the terminal first, Claude Code ignores the hook's later answer, so a farero deny can be followed by the tool running (`internal/core/agentwait.go` corrects the log row). Esc while an allowed tool runs is recorded by Claude Code as a rejection and sends no hook event either.
+- Esc, Ctrl-C and "No" at the terminal's permission prompt send no hook event. Claude Code only writes `[Request interrupted by user…]` into the transcript, and "No"/Esc also kills a waiting `PermissionRequest` hook. "Yes" in the terminal does not end the hook: the tool runs and `PostToolUse` arrives while the hook still waits (`internal/core/agentwait.go`, `session.CheckInterrupts`).
+- `Notification` carries `notification_type` (`permission_prompt` about 6 s after an unanswered `PermissionRequest`, `idle_prompt` 60 s after `Stop`). An API error ends the turn with `StopFailure` instead of `Stop`.
+- Internal forks (compaction, prompt suggestions) send `PreToolUse` with `agent_id` but no `agent_type` key, for tools that never run. Real subagents carry both and share the parent's `session_id`.
+- Claude Code before 2.1.101 ignores the whole `settings.json` if it has a hook event name it does not know, so farero refuses to register with a Claude Code older than `MinClaudeVersion`.
+- A hook still running after claude exited is adopted by launchd: its parent PID is 1.
+- GitHub's remote MCP server ignores headers it does not know. Its read-only switch is `X-MCP-Readonly` (`X-MCP-Read-Only` left all 44 default-toolset tools listed). The default toolsets also list the app-only `ui_get` (MCP Apps `visibility: app`), which the table blocks.
+- Railway's remote MCP server listed 68 tools on 2026-10-08, and the table classifies every one. For an OAuth app such as farero, `list-variables` returns variable names only and `get-bucket-credentials` returns no keys.
+- Resend's hosted MCP server listed 132 tools on 2026-10-10. The table classifies only the 16 mail tools (Q48), and the rest stay hidden. Every Resend tool requires the analytics inputs `context` (the call's purpose) and `llm_model`, so they show on approval cards. Resend's consent page (team, Full access or Sending access, "Slide to allow") needs a browser that is already logged in to Resend: logged out, the user goes to `/login` and may end up on Resend's API key screen instead of coming back (seen twice on 2026-10-09).
+- Upstream tool lists drift. `farero-devctl plugin tools <plugin>` (IPC `plugin.tools`) shows the live list next to the table, and farerod logs the upstream tools the table does not classify (they stay hidden).
+- Claude Code 2.1.293 may start in auto mode, where its classifier allows commands without a `PermissionRequest` (no farero card), and its permission prompt gained "Yes, and switch to auto mode" (so "No" moved). The e2e scripts pass `--permission-mode default` and pick prompt options by text.
 
 ## Working rules for this repo
 

@@ -206,6 +206,17 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		}()
 		return ipc.TypeOK, nil, nil
 
+	case ipc.TypePluginTools:
+		r, err := ipc.Decode[ipc.PluginRef](m)
+		if err != nil {
+			return "", nil, err
+		}
+		t, err := c.PluginTools(ctx, r.Plugin)
+		if err != nil {
+			return "", nil, err
+		}
+		return ipc.TypePluginTools, t, nil
+
 	case ipc.TypePluginDisconnect:
 		r, err := ipc.Decode[ipc.PluginRef](m)
 		if err != nil {
@@ -260,14 +271,23 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		return ipc.TypeSettingsGet, c.settings(ctx), nil
 
 	case ipc.TypeSettingsSet:
-		s, err := ipc.Decode[ipc.Settings](m)
+		s, err := ipc.Decode[ipc.SettingsSet](m)
 		if err != nil {
 			return "", nil, err
 		}
-		if s.ResultLimitBytes > 0 {
-			c.store.SetSetting(ctx, settingResultLimit, strconv.Itoa(s.ResultLimitBytes))
+		if n := s.ResultLimitBytes; n != nil && !validResultLimit(*n) {
+			return "", nil, fmt.Errorf("result_limit_bytes must be between %d and %d", store.MinResultLimit, store.MaxResultLimit)
 		}
-		c.store.SetSetting(ctx, settingUpdateCheck, strconv.FormatBool(s.UpdateCheck))
+		if s.ResultLimitBytes != nil {
+			if err := c.store.SetSetting(ctx, settingResultLimit, strconv.Itoa(*s.ResultLimitBytes)); err != nil {
+				return "", nil, err
+			}
+		}
+		if s.UpdateCheck != nil {
+			if err := c.store.SetSetting(ctx, settingUpdateCheck, strconv.FormatBool(*s.UpdateCheck)); err != nil {
+				return "", nil, err
+			}
+		}
 		return ipc.TypeSettingsGet, c.settings(ctx), nil
 	}
 	if h, ok := c.extraUI[m.Type]; ok {
@@ -301,4 +321,18 @@ func (c *Core) HandleUI(typ string, h UIHandler) {
 		c.extraUI = map[string]UIHandler{}
 	}
 	c.extraUI[typ] = h
+}
+
+// BroadcastSnapshot sends every connected app a fresh snapshot. farerod
+// opens its socket before the Keychain-backed startup (gateway secret,
+// plugin tokens) finishes, and the gateway state has no notification of its
+// own; the app rebuilds its state from any snapshot (docs/ipc.md).
+func (c *Core) BroadcastSnapshot(ctx context.Context) {
+	c.hub.broadcast(ipc.TypeStateSnapshot, c.snapshot(ctx))
+}
+
+// Notify sends every connected app a server notification registered from
+// outside core (agent config status after the automatic path fix).
+func (c *Core) Notify(typ string, data any) {
+	c.hub.broadcast(typ, data)
 }

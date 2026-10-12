@@ -30,6 +30,22 @@ struct SemVerTests {
         #expect(SemVer("v1.2.0") == SemVer("1.2"))
         #expect(SemVer("1.10.0")! > SemVer("1.9.0")!)
     }
+
+    /// semver.org 11.4: numeric identifiers compare as numbers and rank
+    /// below alphanumeric ones; a shorter prefix ranks lower; a release
+    /// ranks above all of its prereleases.
+    @Test func prereleaseIdentifiers() {
+        #expect(SemVer("0.1.0-beta.1")! < SemVer("0.1.0-beta.2")!)
+        #expect(SemVer("0.1.0-beta.2")! < SemVer("0.1.0-beta.10")!)
+        #expect(SemVer("0.1.0-beta.10")! < SemVer("0.1.0")!)
+        #expect(SemVer("0.1.0-beta.1")! < SemVer("0.1.0-rc.1")!)
+        #expect(SemVer("0.1.0-1")! < SemVer("0.1.0-beta")!)
+        #expect(SemVer("0.1.0-beta")! < SemVer("0.1.0-beta.1")!)
+        #expect(SemVer("0.1.0-beta.1")! < SemVer("0.1.0-beta.a")!)
+        #expect(SemVer("0.1.0-beta.1") == SemVer("v0.1.0-beta.1+build.7"))
+        #expect(!(SemVer("0.1.0")! < SemVer("0.1.0-beta.1")!))
+        #expect(!(SemVer("0.1.0")! < SemVer("0.1.0")!))
+    }
 }
 
 @Suite("Update check")
@@ -54,6 +70,34 @@ struct UpdateCheckTests {
         var insecure = release
         insecure.htmlURL = "http://example.com"
         #expect(UpdateCheck.newer(release: insecure, currentVersion: "0.1.0") == nil)
+    }
+
+    /// v0.1.0-beta.1 ships as a GitHub prerelease before v0.1.0;
+    /// `releases/latest` never returns a prerelease.
+    @Test func betaIsToldAboutTheReleaseAndTheReleaseNotAboutABeta() {
+        let final = UpdateCheck.Release(tagName: "v0.1.0", htmlURL: "https://github.com/farero-dev/farero-dev.github.io/releases/tag/v0.1.0")
+        #expect(UpdateCheck.newer(release: final, currentVersion: "0.1.0-beta.1")?.version == "0.1.0")
+        #expect(UpdateCheck.newer(release: final, currentVersion: "0.1.0-beta.2")?.version == "0.1.0")
+        #expect(UpdateCheck.newer(release: final, currentVersion: "0.1.0") == nil)
+        #expect(UpdateCheck.newer(release: final, currentVersion: "0.1.1") == nil)
+        let beta2 = UpdateCheck.Release(tagName: "v0.1.0-beta.2", htmlURL: final.htmlURL, prerelease: true)
+        #expect(UpdateCheck.newer(release: beta2, currentVersion: "0.1.0-beta.1") == nil)
+        #expect(UpdateCheck.newer(release: beta2, currentVersion: "0.1.0") == nil)
+        // Even if GitHub returned a beta tag as a full release.
+        let betaTag = UpdateCheck.Release(tagName: "v0.1.0-beta.2", htmlURL: final.htmlURL)
+        #expect(UpdateCheck.newer(release: betaTag, currentVersion: "0.1.0") == nil)
+        #expect(UpdateCheck.newer(release: betaTag, currentVersion: "0.1.0-beta.1")?.version == "0.1.0-beta.2")
+    }
+
+    @Test func devBuildsAndDevRunsDoNotCheck() {
+        #expect(UpdateCheck.isCheckable(currentVersion: "0.1.0"))
+        #expect(UpdateCheck.isCheckable(currentVersion: "0.1.0-beta.1"))
+        #expect(!UpdateCheck.isCheckable(currentVersion: "0.0.0"))
+        #expect(!UpdateCheck.isCheckable(currentVersion: "0.0.0-e2e"))
+        #expect(!UpdateCheck.isCheckable(currentVersion: "v0.0.0+abc"))
+        #expect(UpdateCheck.newer(release: release, currentVersion: "0.0.0-e2e") == nil)
+        #expect(!UpdateCheck.isCheckable(currentVersion: "0.1.0", environment: ["FARERO_SOCKET": "/tmp/f/farerod.sock"]))
+        #expect(UpdateCheck.isCheckable(currentVersion: "0.1.0", environment: ["FARERO_SOCKET": ""]))
     }
 
     @Test func httpResponses() throws {
@@ -85,5 +129,72 @@ struct DaemonVersionCheckTests {
         #expect(!DaemonVersionCheck.needsReregistration(appVersion: "dev", daemonVersion: "0.1.0"))
         #expect(!DaemonVersionCheck.needsReregistration(appVersion: nil, daemonVersion: "0.1.0"))
         #expect(!DaemonVersionCheck.needsReregistration(appVersion: "__VERSION__", daemonVersion: "0.1.0"))
+        #expect(!DaemonVersionCheck.needsReregistration(appVersion: "0.0.0-e2e", daemonVersion: "0.1.0"))
+    }
+
+    @Test func prereleaseVersionsCompareWhole() {
+        #expect(!DaemonVersionCheck.needsReregistration(appVersion: "0.1.0-beta.1", daemonVersion: "0.1.0-beta.1"))
+        #expect(!DaemonVersionCheck.needsReregistration(appVersion: "0.1.0-beta.1", daemonVersion: "v0.1.0-beta.1"))
+        #expect(DaemonVersionCheck.needsReregistration(appVersion: "0.1.0-beta.2", daemonVersion: "0.1.0-beta.1"))
+        #expect(DaemonVersionCheck.needsReregistration(appVersion: "0.1.0", daemonVersion: "0.1.0-beta.1"))
+        #expect(DaemonVersionCheck.needsReregistration(appVersion: "0.1.0-beta.1", daemonVersion: "0.1.0"))
+    }
+}
+
+/// A quarantined download opened from ~/Downloads runs from an App
+/// Translocation copy; registering farerod or the hook by that path would
+/// point at a copy that is gone on the next launch.
+@Suite("Install location")
+struct InstallLocationTests {
+    let home = URL(fileURLWithPath: "/Users/me")
+
+    @Test func translocatedCopyIsRecognised() {
+        let path = "/private/var/folders/x1/abc/T/AppTranslocation/5A1B-4C2D/d/Farero.app"
+        #expect(InstallLocation.classify(bundlePath: path, home: home) == .translocated)
+        #expect(InstallLocation.classify(bundlePath: "/var/folders/x1/abc/T/AppTranslocation/5A1B/d/Farero.app/", home: home) == .translocated)
+    }
+
+    @Test func applicationsFolders() {
+        #expect(InstallLocation.classify(bundlePath: "/Applications/Farero.app", home: home) == .applications)
+        #expect(InstallLocation.classify(bundlePath: "/Applications/Utilities/Farero.app", home: home) == .applications)
+        #expect(InstallLocation.classify(bundlePath: "/Users/me/Applications/Farero.app", home: home) == .applications)
+        #expect(InstallLocation.classify(bundlePath: "/Users/other/Applications/Farero.app", home: home) == .elsewhere)
+        #expect(InstallLocation.classify(bundlePath: "/ApplicationsOld/Farero.app", home: home) == .elsewhere)
+    }
+
+    @Test func otherPlacesKeepWorking() {
+        #expect(InstallLocation.classify(bundlePath: "/Users/me/Downloads/Farero.app", home: home) == .elsewhere)
+        #expect(InstallLocation.classify(bundlePath: "/Users/me/src/farero/build/Farero.app", home: home) == .elsewhere)
+    }
+}
+
+/// With ad-hoc signing, replacing the app bundle (an update or a rebuild)
+/// invalidates the LaunchAgent's background item, and launchd can no longer
+/// start farerod (M0, 2026-10-06). The app cannot learn the daemon version
+/// then, so it compares the farerod it registered with the one it ships.
+@Suite("Daemon registration identity")
+struct DaemonRegistrationCheckTests {
+    let current = DaemonRegistrationCheck.identity(
+        executablePath: "/Applications/Farero.app/Contents/MacOS/farerod", cdhash: Data([0x0a, 0xff, 0x01]))
+
+    @Test func identityIsPathAndHexHash() {
+        #expect(current == "/Applications/Farero.app/Contents/MacOS/farerod#0aff01")
+    }
+
+    @Test func changedOrUnknownRegistrationNeedsReregistration() {
+        let rebuilt = DaemonRegistrationCheck.identity(
+            executablePath: "/Applications/Farero.app/Contents/MacOS/farerod", cdhash: Data([0x0b]))
+        let moved = DaemonRegistrationCheck.identity(
+            executablePath: "/Users/me/Applications/Farero.app/Contents/MacOS/farerod", cdhash: Data([0x0a, 0xff, 0x01]))
+        #expect(DaemonRegistrationCheck.needsReregistration(recorded: rebuilt, current: current))
+        #expect(DaemonRegistrationCheck.needsReregistration(recorded: moved, current: current))
+        // Registered by a build that did not record it.
+        #expect(DaemonRegistrationCheck.needsReregistration(recorded: nil, current: current))
+    }
+
+    @Test func sameOrUnreadableIdentityKeepsRegistration() {
+        #expect(!DaemonRegistrationCheck.needsReregistration(recorded: current, current: current))
+        // The signature could not be read: do not churn the registration.
+        #expect(!DaemonRegistrationCheck.needsReregistration(recorded: "x", current: nil))
     }
 }
