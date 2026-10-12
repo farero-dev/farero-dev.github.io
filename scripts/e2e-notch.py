@@ -60,7 +60,8 @@ import subprocess
 import sys
 import time
 
-from e2elib import BIN, ROOT, Abort, Harness, dialog_open, print_daemon_warnings, ready, step_register, step_remove
+from e2elib import (BIN, ROOT, Abort, Harness, check_run_dir, dialog_open, print_daemon_warnings, ready, step_register,
+                    step_remove)
 
 
 def load(name):
@@ -98,6 +99,7 @@ def fact(h, label, text):
 
 
 def prepare():
+    check_run_dir(E)
     P.stop_farerod_of(E)
     os.makedirs(E, exist_ok=True)
     for name in os.listdir(E):

@@ -57,7 +57,7 @@
   "agent": "claude",
   "plugin": "github",                  // agent 종류면 ""
   "tool": "issue_write",               // agent 종류면 "Bash", "Edit" 등
-  "input": { ... },                    // 입력값 전체(JSON)
+  "input": { ... },                    // 입력값(JSON). 1MB가 넘으면 긴 문자열 값의 뒷부분을 잘라 1MB 안에 맞춘다
   "reasons": ["policy", "tainted"],    // 아래 표
   "allow_session": true,               // "이번 세션 동안 허용" 버튼을 보일지
   "created_at": "...",
@@ -82,6 +82,8 @@
 }
 ```
 `result_text`는 결과를 `result_limit_bytes`(`settings.get`, 기본 16KB, Q46)까지 UTF-8 글자 경계에서 잘라 저장한 값이고, `result_bytes`는 자르기 전 크기다. 에이전트는 잘리지 않은 결과를 받는다.
+
+`input`도 같은 한도를 넘으면 JSON 구조는 그대로 두고 긴 문자열 값(Write의 content, 첨부의 base64 등)의 뒷부분을 잘라 `…[+N bytes]` 표시를 붙인다. 문자열을 모두 비워도 넘거나 JSON이 아니면 크기만 적은 문자열이 된다. `call.logged`의 `input`은 같은 방식으로 8KB, `result_text`는 2KB까지만 보낸다. 정책 판단, 세션 허용 범위(Q38), 업스트림 호출은 잘리지 않은 입력을 쓴다.
 
 `decision` 값은 다음과 같다.
 - `auto_allowed`: 자동 허용
