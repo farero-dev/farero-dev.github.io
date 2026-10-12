@@ -3,12 +3,15 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/farero-dev/farero/daemon/internal/secret"
 	"golang.org/x/oauth2"
 )
 
@@ -41,6 +44,7 @@ func TestFetchServerMeta(t *testing.T) {
 		"issuer": srv.URL + "/tenant", "token_endpoint": srv.URL + "/token", "authorization_endpoint": srv.URL + "/authorize",
 		"registration_endpoint": srv.URL + "/register", "device_authorization_endpoint": srv.URL + "/device",
 	}))
+	mux.HandleFunc("/.well-known/oauth-authorization-server/token-only", serveJSON(map[string]any{"token_endpoint": srv.URL + "/token"}))
 	mux.HandleFunc("/.well-known/oauth-authorization-server/no-token", serveJSON(map[string]any{"authorization_endpoint": srv.URL + "/authorize"}))
 	for i, field := range []string{"token_endpoint", "authorization_endpoint", "registration_endpoint", "device_authorization_endpoint"} {
 		doc := map[string]any{"token_endpoint": srv.URL + "/token"}
@@ -52,6 +56,10 @@ func TestFetchServerMeta(t *testing.T) {
 	m, err := FetchServerMeta(ctx, srv.URL+"/tenant/")
 	if err != nil || m.TokenEndpoint != srv.URL+"/token" || m.DeviceAuthorizationEndpoint != srv.URL+"/device" {
 		t.Fatalf("tenant: %+v %v", m, err)
+	}
+	// Endpoints a server does not have are left empty, not refused.
+	if m, err := FetchServerMeta(ctx, srv.URL+"/token-only"); err != nil || m.RegistrationEndpoint != "" {
+		t.Fatalf("token endpoint only: %+v %v", m, err)
 	}
 	if _, err := FetchServerMeta(ctx, srv.URL+"/no-token"); err == nil || !strings.Contains(err.Error(), "token_endpoint") {
 		t.Errorf("no token endpoint: %v", err)
@@ -154,6 +162,74 @@ func TestLoopbackFlowCallbackErrors(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", query, err, want)
+		}
+	}
+}
+
+// refreshOnce runs one refresh against a token endpoint that answers with
+// reply, and returns the token (or error) and the form it was sent.
+func refreshOnce(t *testing.T, cfg oauth2.Config, reply http.HandlerFunc) (*oauth2.Token, error, url.Values) {
+	t.Helper()
+	forms := make(chan url.Values, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		forms <- r.Form
+		reply(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	cfg.Endpoint = oauth2.Endpoint{TokenURL: srv.URL}
+	tk := Tokens{Store: secret.NewMemoryStore(), Plugin: "test"}
+	ts := tk.Source(&cfg, &oauth2.Token{AccessToken: "old", RefreshToken: "rt0", Expiry: time.Now().Add(-time.Minute)}, "", nil)
+	tok, err := ts.Token()
+	return tok, err, <-forms
+}
+
+// A refresh sends client_secret only for clients that have one, accepts
+// JSON and form-encoded answers, keeps the old refresh token when none comes
+// back, and sets the expiry from expires_in.
+func TestRefreshRequestAndAnswer(t *testing.T) {
+	answer := func(ct, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", ct)
+			io.WriteString(w, body)
+		}
+	}
+	tok, err, form := refreshOnce(t, oauth2.Config{ClientID: "c", ClientSecret: "sec"},
+		answer("application/json", `{"access_token":"at1","token_type":"Bearer","expires_in":3600}`))
+	if err != nil || form.Get("client_secret") != "sec" || tok.AccessToken != "at1" || tok.RefreshToken != "rt0" {
+		t.Fatalf("with secret: %+v %v %v", tok, err, form)
+	}
+	if d := time.Until(tok.Expiry); d < 3590*time.Second || d > 3600*time.Second {
+		t.Fatalf("expiry in %v, want about an hour", d)
+	}
+	tok, err, form = refreshOnce(t, oauth2.Config{ClientID: "c"},
+		answer("application/x-www-form-urlencoded", "access_token=at2&token_type=bearer&refresh_token=rt2&expires_in=0"))
+	if _, sent := form["client_secret"]; err != nil || sent || tok.AccessToken != "at2" || tok.RefreshToken != "rt2" || !tok.Expiry.IsZero() {
+		t.Fatalf("form answer: %+v %v %v", tok, err, form)
+	}
+}
+
+// A refresh fails without an access token, and the error names the
+// server's error code, or the HTTP status when there is none.
+func TestRefreshErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status int
+		body   string
+		want   []string
+	}{
+		"no access token": {200, `{"token_type":"Bearer"}`, []string{"200"}},
+		"error code":      {400, `{"error":"invalid_grant","error_description":"expired"}`, []string{"invalid_grant", "expired"}},
+		"status only":     {500, ``, []string{"500"}},
+	} {
+		_, err, _ := refreshOnce(t, oauth2.Config{ClientID: "c"}, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(tc.status)
+			io.WriteString(w, tc.body)
+		})
+		for _, want := range tc.want {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: %v, want %q", name, err, want)
+			}
 		}
 	}
 }
