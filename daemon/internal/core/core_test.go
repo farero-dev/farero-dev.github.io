@@ -240,7 +240,16 @@ func (h *harness) agent(sessionID string, pid int) *agent {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.t.Cleanup(func() { cs.Close() })
+	h.t.Cleanup(func() {
+		// Close waits for calls in flight; one still waiting on a card
+		// would hold a failed test until the approval timeout.
+		done := make(chan struct{})
+		go func() { cs.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
 	h.hook(sessionID, "SessionStart", "", nil, pid)
 	return &agent{h: h, cs: cs, sid: sessionID, pid: pid}
 }
