@@ -14,11 +14,13 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// GitHub endpoints. The remote MCP server accepts the OAuth App token as a
-// Bearer token (검증 결과 3장, source; live test pending in M0-4).
+// GitHub endpoints. The remote MCP server accepts the OAuth App's device
+// flow token as a Bearer token (M0-4, 검증 결과 9장).
 const (
 	githubMCP      = "https://api.githubcopilot.com/mcp/"
 	githubToolsets = "context,repos,issues,pull_requests,users"
+	// githubReadOnlyHeader lists only read tools (docs/remote-server.md).
+	githubReadOnlyHeader = "X-MCP-Readonly"
 )
 
 var githubEndpoint = oauth2.Endpoint{
@@ -90,7 +92,9 @@ func (g *GitHub) plugin(ctx context.Context, cfg *oauth2.Config, tok *oauth2.Tok
 	}
 	headers := map[string]string{"X-MCP-Toolsets": githubToolsets}
 	if g.env.option(ctx, "github", "read_only") == "true" {
-		headers["X-MCP-Read-Only"] = "true"
+		// The remote server ignores unknown headers: "X-MCP-Read-Only"
+		// left every write tool listed (M5).
+		headers[githubReadOnlyHeader] = "true"
 	}
 	return upstream.NewRemote("github", githubMCP, auth.HTTPClient(ts, headers), g.env.Version)
 }

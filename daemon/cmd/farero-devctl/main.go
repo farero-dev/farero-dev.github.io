@@ -7,6 +7,7 @@
 //	farero-devctl log [-q text] [-n 20]
 //	farero-devctl policy [set <plugin> <tool> [auto|ask|block]]  (no level: back to the default)
 //	farero-devctl agentcfg status|plan|apply|remove
+//	farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]
 package main
 
 import (
@@ -14,6 +15,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
@@ -24,7 +27,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg")
+		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg|plugin")
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -99,9 +102,98 @@ func main() {
 		}
 		conn.Send("agentcfg."+op, "a", ipc.AgentRef{Agent: "claude"})
 		printReply(conn, "a")
+	case "plugin":
+		pluginCmd(conn, args)
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command", cmd)
 		os.Exit(2)
+	}
+}
+
+const pluginUsage = "usage: farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]"
+
+func pluginCmd(conn *ipc.Conn, args []string) {
+	if len(args) == 0 {
+		conn.Send(ipc.TypePluginList, "l", nil)
+		printReply(conn, "l")
+		return
+	}
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, pluginUsage)
+		os.Exit(2)
+	}
+	op, name := args[0], args[1]
+	switch op {
+	case "connect":
+		params := map[string]string{}
+		for _, kv := range args[2:] {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok {
+				fmt.Fprintln(os.Stderr, pluginUsage)
+				os.Exit(2)
+			}
+			params[k] = v
+		}
+		conn.Send(ipc.TypePluginConnect, "c", ipc.PluginConnect{Plugin: name, Params: params})
+		os.Exit(waitConnect(conn, name))
+	case "disconnect":
+		conn.Send(ipc.TypePluginDisconnect, "d", ipc.PluginRef{Plugin: name})
+		printReply(conn, "d")
+	case "option":
+		if len(args) != 4 {
+			fmt.Fprintln(os.Stderr, pluginUsage)
+			os.Exit(2)
+		}
+		conn.Send(ipc.TypePluginSetOption, "o", ipc.PluginSetOption{Plugin: name, Key: args[2], Value: args[3]})
+		printReply(conn, "o")
+	case "tools":
+		conn.Send(ipc.TypePluginTools, "t", ipc.PluginRef{Plugin: name})
+		printReply(conn, "t")
+	default:
+		fmt.Fprintln(os.Stderr, pluginUsage)
+		os.Exit(2)
+	}
+}
+
+// waitConnect follows a plugin.connect like the app's plugin window: it
+// prints the device code or authorization URL, opens the URL in the
+// browser, and returns once the plugin is connected (0) or failed (1).
+func waitConnect(conn *ipc.Conn, plugin string) int {
+	for {
+		m, err := conn.Read()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		switch m.Type {
+		case ipc.TypeError:
+			if m.ID == "c" {
+				fmt.Fprintln(os.Stderr, string(m.Data))
+				return 1
+			}
+		case ipc.TypePluginPrompt:
+			p, _ := ipc.Decode[ipc.PluginPrompt](m)
+			if p.Plugin != plugin {
+				continue
+			}
+			if p.UserCode != "" {
+				fmt.Println("code:", p.UserCode)
+			}
+			fmt.Println("open:", p.URL)
+			exec.Command("open", p.URL).Run()
+		case ipc.TypePluginUpdated:
+			p, _ := ipc.Decode[model.PluginState](m)
+			if p.Plugin != plugin {
+				continue
+			}
+			fmt.Println(line(m))
+			switch p.Status {
+			case model.PluginConnected:
+				return 0
+			case model.PluginError, model.PluginExpired, model.PluginDisconnected:
+				return 1
+			}
+		}
 	}
 }
 

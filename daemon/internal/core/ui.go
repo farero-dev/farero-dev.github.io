@@ -206,6 +206,17 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		}()
 		return ipc.TypeOK, nil, nil
 
+	case ipc.TypePluginTools:
+		r, err := ipc.Decode[ipc.PluginRef](m)
+		if err != nil {
+			return "", nil, err
+		}
+		t, err := c.PluginTools(ctx, r.Plugin)
+		if err != nil {
+			return "", nil, err
+		}
+		return ipc.TypePluginTools, t, nil
+
 	case ipc.TypePluginDisconnect:
 		r, err := ipc.Decode[ipc.PluginRef](m)
 		if err != nil {

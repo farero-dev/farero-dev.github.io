@@ -71,6 +71,7 @@ type Core struct {
 	tools       []*mcp.Tool // the exposed list, kept for a gateway started later
 	pluginErr   map[string]string
 	toolIndex   map[string]exposedTool // exposed name -> plugin/tool
+	hidden      map[string]string      // plugin -> upstream tools missing from the table, as last logged
 
 	waits agentWaits // PermissionRequests waiting for the app
 	uses  toolUses   // tool_use_ids, for answers the agent did not follow
@@ -102,6 +103,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		connectors: o.Connectors,
 		pluginErr:  map[string]string{},
 		toolIndex:  map[string]exposedTool{},
+		hidden:     map[string]string{},
 	}
 	c.broker = broker.New(c, o.ApprovalTimeout)
 	c.sessions, err = session.NewManager(ctx, o.Store, func(s model.Session) {
@@ -194,15 +196,21 @@ func (c *Core) RefreshTools(ctx context.Context) {
 			c.log.Warn("list tools", "plugin", p.Name(), "err", err)
 			continue
 		}
+		var hidden []string
 		for _, t := range list {
 			eff, ok := c.policy.Lookup(p.Name(), t.Name)
-			if !ok || eff.Level == policy.LevelBlock {
+			if !ok {
+				hidden = append(hidden, t.Name)
+				continue
+			}
+			if eff.Level == policy.LevelBlock {
 				continue
 			}
 			name := policy.ToolKey(p.Name(), t.Name)
 			index[name] = exposedTool{plugin: p.Name(), tool: t.Name}
 			tools = append(tools, exposeTool(name, t, eff))
 		}
+		c.noteHidden(p.Name(), hidden)
 	}
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 	c.mu.Lock()
@@ -213,6 +221,61 @@ func (c *Core) RefreshTools(ctx context.Context) {
 	if g != nil {
 		g.SetTools(tools)
 	}
+}
+
+// noteHidden logs a plugin's upstream tools that the table does not
+// classify, when that set changes. They stay hidden (기능 명세서 6-2); the log
+// shows when an upstream adds or renames tools.
+func (c *Core) noteHidden(plugin string, names []string) {
+	sort.Strings(names)
+	joined := strings.Join(names, ",")
+	c.mu.Lock()
+	changed := c.hidden[plugin] != joined
+	c.hidden[plugin] = joined
+	c.mu.Unlock()
+	if changed && joined != "" {
+		c.log.Info("upstream tools not in the classification table are hidden", "plugin", plugin, "count", len(names), "tools", joined)
+	}
+}
+
+// PluginTools lists a connected plugin's live upstream tools next to their
+// classification, plus the table's tools for it that the upstream no longer
+// lists. It is how the table is checked against a real tools/list
+// (기능 명세서 6-4).
+func (c *Core) PluginTools(ctx context.Context, plugin string) (ipc.PluginTools, error) {
+	p, ok := c.plugins.Get(plugin)
+	if !ok {
+		return ipc.PluginTools{}, fmt.Errorf("plugin %q is not connected", plugin)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	list, err := p.ListTools(ctx)
+	if err != nil {
+		return ipc.PluginTools{}, err
+	}
+	out := ipc.PluginTools{Plugin: plugin, Tools: []ipc.PluginTool{}, Missing: []string{}}
+	listed := map[string]bool{}
+	for _, t := range list {
+		listed[t.Name] = true
+		pt := ipc.PluginTool{Name: t.Name, Title: t.Title, Description: t.Description}
+		if a := t.Annotations; a != nil {
+			pt.ReadOnlyHint = a.ReadOnlyHint
+			pt.DestructiveHint = a.DestructiveHint
+		}
+		if eff, ok := c.policy.Lookup(plugin, t.Name); ok {
+			pt.Classified = true
+			pt.Level = eff.Level
+			pt.Exposed = eff.Level != policy.LevelBlock
+		}
+		out.Tools = append(out.Tools, pt)
+	}
+	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
+	for _, ti := range c.policy.Tools() {
+		if ti.Plugin == plugin && !listed[ti.Tool] {
+			out.Missing = append(out.Missing, ti.Tool)
+		}
+	}
+	return out, nil
 }
 
 func exposeTool(name string, t *mcp.Tool, eff policy.Effective) *mcp.Tool {

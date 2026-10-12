@@ -153,6 +153,7 @@
 | `plugin.connect` | `{"plugin","params":{...}}` | `ok`가 바로 오고, 진행 상황은 `plugin.prompt`와 `plugin.updated`로 온다. Gmail은 `params`에 `client_id`, `client_secret`을 넣는다 |
 | `plugin.disconnect` | `{"plugin"}` | `ok`. 토큰을 지운다 |
 | `plugin.set_option` | `{"plugin","key","value"}` | `ok`. 예: GitHub `read_only` = `"true"` |
+| `plugin.tools` | `{"plugin"}` | `plugin.tools`: `{"plugin","tools":[{"name","title","description","read_only_hint","destructive_hint","classified","level","exposed"}],"missing":[...]}`. 연결된 플러그인의 실제 `tools/list`를 분류표와 나란히 보여 준다. `classified: false`는 분류표에 없어 숨긴 도구, `missing`은 분류표에는 있지만 업스트림 목록에 없는 도구다(이름이 바뀌었거나 없어짐). 연결되지 않았으면 `error` |
 | `settings.get` | 없음 | `settings.get`: `{"result_limit_bytes","update_check"}` |
 | `settings.set` | `{"result_limit_bytes","update_check"}` | `settings.get` |
 | `agentcfg.status` | `{"agent":"claude"}` | `agentcfg.status`: AgentCfgStatus |
