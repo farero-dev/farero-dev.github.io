@@ -475,8 +475,30 @@ func TestHooksStateChecksEveryEvent(t *testing.T) {
 	out, _ := pretty(o)
 	os.WriteFile(c.settingsPath(), out, 0o644)
 	c.HookPath = "/Users/me/Applications/Farero.app/Contents/MacOS/farero-hook"
-	if st := c.Status(ctx); st.HooksInstalled || !st.StalePath {
-		t.Fatalf("%+v", st)
+	// hooksState itself: Status would also flag the MCP entry, whose
+	// headersHelper names the old path too.
+	installed, present, stale := c.hooksState(mustParse(t, readFile(t, c.settingsPath())))
+	if installed || !present || !stale {
+		t.Fatalf("installed=%v present=%v stale=%v", installed, present, stale)
+	}
+}
+
+// Without the record of the original, Remove cannot know farero created
+// settings.json: it leaves an empty object instead of deleting the file.
+func TestRemoveWithoutOriginalKeepsFile(t *testing.T) {
+	c, _ := setup(t, "")
+	ctx := context.Background()
+	if _, err := c.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(c.originalPath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !sameJSON(readFile(t, c.settingsPath()), "{}") {
+		t.Fatalf("settings: %q", readFile(t, c.settingsPath()))
 	}
 }
 
