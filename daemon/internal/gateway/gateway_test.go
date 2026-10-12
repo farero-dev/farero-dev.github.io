@@ -302,37 +302,61 @@ func (s *syncBuffer) String() string {
 }
 
 // The request log names the protocol, the client and the connection id, at
-// connection setup and on later requests (M4: which protocol an agent
-// speaks is read from here).
+// connection setup (initialize, or server/discover for 2026-07-28) and on
+// later requests (M4: which protocol an agent speaks is read from here).
 func TestRequestLogNamesProtocolClientAndConn(t *testing.T) {
-	var logs syncBuffer
-	g := New("test", "s3cret", &recCaller{}, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	g.SetTools([]*mcp.Tool{tool("dev_echo")})
-	port, err := g.Start(0)
-	if err != nil {
-		t.Fatal(err)
+	for _, version := range protocols {
+		t.Run(version, func(t *testing.T) {
+			var logs syncBuffer
+			g := New("test", "s3cret", &recCaller{}, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			g.SetTools([]*mcp.Tool{tool("dev_echo")})
+			port, err := g.Start(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { g.Shutdown(context.Background()) })
+			cl := mcp.NewClient(&mcp.Implementation{Name: "t", Version: "1"}, nil)
+			cs, err := cl.Connect(context.Background(), &mcp.StreamableClientTransport{
+				Endpoint:   URL(port),
+				HTTPClient: &http.Client{Transport: headerRT{map[string]string{"Authorization": "Bearer s3cret", ConnHeader: "4242.abc"}}},
+			}, &mcp.ClientSessionOptions{ProtocolVersion: version})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cs.Close()
+			if _, err := cs.ListTools(context.Background(), nil); err != nil {
+				t.Fatal(err)
+			}
+			var setup, list string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				switch {
+				case strings.Contains(line, "method=initialize") || strings.Contains(line, "method=server/discover"):
+					setup = line
+				case strings.Contains(line, "method=tools/list"):
+					list = line
+				}
+			}
+			for name, line := range map[string]string{"setup": setup, "tools/list": list} {
+				if !strings.Contains(line, "protocol="+version) || !strings.Contains(line, `client="t 1"`) || !strings.Contains(line, "conn=4242.abc") {
+					t.Errorf("%s log line: %q\n%s", name, line, logs.String())
+				}
+			}
+		})
 	}
-	t.Cleanup(func() { g.Shutdown(context.Background()) })
-	cs, err := connect(t, port, map[string]string{"Authorization": "Bearer s3cret", ConnHeader: "4242.abc"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cs.Close()
-	if _, err := cs.ListTools(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	var setup, list string
-	for _, line := range strings.Split(logs.String(), "\n") {
-		switch {
-		case strings.Contains(line, "method=initialize") || strings.Contains(line, "method=server/discover"):
-			setup = line
-		case strings.Contains(line, "method=tools/list"):
-			list = line
+}
+
+// A tool the SDK refuses is skipped without stopping the update: the tools
+// after it are still added, whichever comes first.
+func TestSetToolsSkipsOnlyTheBadTool(t *testing.T) {
+	g, _, _ := start(t)
+	for round := 0; round < 5; round++ {
+		tools := []*mcp.Tool{{Name: fmt.Sprintf("dev_bad%d", round), InputSchema: json.RawMessage(`{"type":"string"}`)}}
+		for i := 0; i < 20; i++ {
+			tools = append(tools, tool(fmt.Sprintf("dev_r%d_%02d", round, i)))
 		}
-	}
-	for name, line := range map[string]string{"setup": setup, "tools/list": list} {
-		if !strings.Contains(line, "protocol=") || !strings.Contains(line, `client="t 1"`) || !strings.Contains(line, "conn=4242.abc") {
-			t.Errorf("%s log line: %q\n%s", name, line, logs.String())
+		g.SetTools(tools)
+		if names := g.ToolNames(); len(names) != 20 || slices.Contains(names, fmt.Sprintf("dev_bad%d", round)) {
+			t.Fatalf("round %d: %d tools listed: %v", round, len(names), names)
 		}
 	}
 }
