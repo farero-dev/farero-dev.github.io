@@ -108,7 +108,7 @@ func (c *Core) decideAgentTool(ctx context.Context, s model.Session, in session.
 		call.Decision = decision
 		call.Reason = reason
 		call.DurationMS = time.Since(start).Milliseconds()
-		call.ID = c.logCall(logCtx, call)
+		call.ID = c.logCall(logCtx, call, &s)
 		if out.Behavior != ipc.BehaviorNone {
 			c.sessions.SetStatus(logCtx, s.ID, model.StatusRunning)
 		}

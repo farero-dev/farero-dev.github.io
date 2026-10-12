@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -74,7 +76,7 @@ func TestDeleteSessionCascades(t *testing.T) {
 	addCall(t, s, b.ID, "issue_read", `{"q":"kept-session-marker"}`, "y")
 	addCall(t, s, "", "issue_read", `{"q":"unknown-session-marker"}`, "z")
 
-	if err := s.DeleteSession(ctx, a.ID); err != nil {
+	if _, err := s.DeleteSession(ctx, a.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := s.HookEventCount(ctx, a.ID); n != 0 {
@@ -91,7 +93,7 @@ func TestDeleteSessionCascades(t *testing.T) {
 	if len(all) != 2 {
 		t.Fatalf("want 2 calls left (other session + unknown), got %d", len(all))
 	}
-	if err := s.DeleteSession(ctx, a.ID); err != ErrNotFound {
+	if _, err := s.DeleteSession(ctx, a.ID, false); err != ErrNotFound {
 		t.Fatalf("second delete: %v", err)
 	}
 }
@@ -196,5 +198,93 @@ func TestCallFilterAcceptsEmptyDates(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"from":"2026-10-02T09:00:00+09:00"}`), &f); err != nil || f.From.IsZero() {
 		t.Fatalf("%+v %v", f, err)
+	}
+}
+
+func TestQueryCallsLimit(t *testing.T) {
+	s := newMem(t)
+	ctx := context.Background()
+	for i := 0; i < MaxQueryLimit+1; i++ {
+		addCall(t, s, "", "issue_read", `{}`, "")
+	}
+	for _, c := range []struct{ limit, want int }{
+		{0, DefaultQueryLimit},
+		{-1, DefaultQueryLimit},
+		{3, 3},
+		{MaxQueryLimit, MaxQueryLimit},
+		{MaxQueryLimit + 1, MaxQueryLimit}, // clamped, not reset to the default
+		{5000, MaxQueryLimit},
+	} {
+		got, err := s.QueryCalls(ctx, CallFilter{Limit: c.limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != c.want {
+			t.Errorf("limit %d: got %d rows, want %d", c.limit, len(got), c.want)
+		}
+	}
+}
+
+func TestDeleteTaintedSessionLeavesTombstone(t *testing.T) {
+	s := newMem(t)
+	ctx := context.Background()
+	clean := addSession(t, s, "clean")
+	dirty := addSession(t, s, "dirty")
+	dirty.Tainted = true
+	s.UpsertSession(ctx, dirty)
+	known := addSession(t, s, "known") // tainted in farerod's memory, not yet stored
+	for _, c := range []struct {
+		id      string
+		tainted bool
+		want    bool
+	}{{clean.ID, false, false}, {dirty.ID, false, true}, {known.ID, true, true}} {
+		left, err := s.DeleteSession(ctx, c.id, c.tainted)
+		if err != nil || left != c.want {
+			t.Fatalf("%s: tombstone %v %v, want %v", c.id, left, err, c.want)
+		}
+	}
+	got, err := s.TaintTombstones(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !got[dirty.ID] || !got[known.ID] {
+		t.Fatalf("tombstones: %v", got)
+	}
+	// A failed delete writes nothing.
+	if _, err := s.DeleteSession(ctx, "claude:nope", true); err != ErrNotFound {
+		t.Fatalf("missing session: %v", err)
+	}
+	if got, _ := s.TaintTombstones(ctx); got["claude:nope"] {
+		t.Fatal("tombstone for a missing session")
+	}
+}
+
+// A database from the first release (schema v1) is backed up and upgraded.
+func TestMigrateFromV1(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "farero.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(migrations[0] + `PRAGMA user_version = 1;`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := os.Stat(path + ".bak-v1"); err != nil {
+		t.Fatalf("no backup: %v", err)
+	}
+	x := addSession(t, s, "old")
+	x.Tainted = true
+	s.UpsertSession(context.Background(), x)
+	if _, err := s.DeleteSession(context.Background(), x.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.TaintTombstones(context.Background()); !got[x.ID] {
+		t.Fatalf("tombstones: %v", got)
 	}
 }

@@ -104,6 +104,10 @@ type Manager struct {
 	// Code moved it to the background and ended the turn (120 s, Claude
 	// Code 2.1.293), and the user can type a new prompt meanwhile.
 	approvals map[string]int
+	// tombstones are deleted sessions that were tainted. Deleting a session
+	// does not clear the agent's context, so the session starts tainted if
+	// it comes back (Q39).
+	tombstones map[string]bool
 
 	// pubMu orders publishing (store, then onUpdate). Changes happen under
 	// mu, and every publisher sends the state as it is when its turn comes,
@@ -132,6 +136,9 @@ func NewManager(ctx context.Context, st *store.Store, onUpdate func(model.Sessio
 	if err != nil {
 		return nil, err
 	}
+	if m.tombstones, err = st.TaintTombstones(ctx); err != nil {
+		return nil, err
+	}
 	for i := range list {
 		s := list[i]
 		m.sessions[s.ID] = &s
@@ -148,7 +155,7 @@ func (m *Manager) SetOnUpdate(f func(model.Session)) {
 
 // Apply runs one hook event through the state machine, creating the session
 // the first time it is seen (even mid-session, e.g. a session started before
-// farero was installed).
+// farero was installed, or one the user deleted while its agent ran on).
 func (m *Manager) Apply(ctx context.Context, agent string, in HookInput, tty string, pid int) (model.Session, error) {
 	now := m.now()
 	id := model.SessionKey(agent, in.SessionID)
@@ -165,8 +172,7 @@ func (m *Manager) Apply(ctx context.Context, agent string, in HookInput, tty str
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if !ok {
-		s = &model.Session{ID: id, Agent: agent, AgentSessionID: in.SessionID, StartedAt: now, LastEventAt: now, Status: model.StatusRunning}
-		m.sessions[id] = s
+		s = m.createLocked(id, agent, in.SessionID, now)
 	}
 	// Hooks are separate processes and SessionEnd runs asynchronously, so
 	// an event of the process that just ended the session can arrive after
@@ -207,6 +213,33 @@ func (m *Manager) Apply(ctx context.Context, agent string, in HookInput, tty str
 		return snap, err
 	}
 	return snap, nil
+}
+
+// createLocked adds a new session, tainted if a deleted tainted session had
+// its id. m.mu must be held.
+func (m *Manager) createLocked(id, agent, agentSessionID string, now time.Time) *model.Session {
+	s := &model.Session{ID: id, Agent: agent, AgentSessionID: agentSessionID, StartedAt: now, LastEventAt: now,
+		Status: model.StatusRunning, Tainted: m.tombstones[id]}
+	m.sessions[id] = s
+	return s
+}
+
+// Revive brings back a session the user deleted while one of its calls was
+// still open (an approval card answered afterwards), so the call's log row
+// has a session to belong to (기능 명세서 5-1). It is created like a new
+// hook event would create it, with prev's agent, directory and terminal. It
+// does nothing if the session exists.
+func (m *Manager) Revive(ctx context.Context, prev model.Session) error {
+	m.mu.Lock()
+	if _, ok := m.sessions[prev.ID]; ok {
+		m.mu.Unlock()
+		return nil
+	}
+	s := m.createLocked(prev.ID, prev.Agent, prev.AgentSessionID, m.now())
+	s.Cwd, s.TTY, s.PID = prev.Cwd, prev.TTY, prev.PID
+	s.Tainted = s.Tainted || prev.Tainted
+	m.mu.Unlock()
+	return m.publish(ctx, prev.ID)
 }
 
 // publish stores a session's current state and tells onUpdate. The store
@@ -376,8 +409,8 @@ func (m *Manager) TurnStopped(ctx context.Context, id string) {
 	})
 }
 
-// MarkTainted flags a session as having read untrusted content. It stays
-// tainted until the session is deleted (기능 명세서 6-2 step 5).
+// MarkTainted flags a session as having read untrusted content (기능 명세서
+// 6-2 step 5). It stays tainted, even across Delete (see tombstones).
 func (m *Manager) MarkTainted(ctx context.Context, id string) {
 	m.mutate(ctx, id, func(s *model.Session) bool {
 		if s.Tainted {
@@ -400,20 +433,28 @@ func (m *Manager) mutate(ctx context.Context, id string, f func(*model.Session) 
 	}
 }
 
-// Delete removes a session and its log.
+// Delete removes a session and its log. The agent may still be running:
+// its next hook event creates the session again, tainted if it was (Q39).
 func (m *Manager) Delete(ctx context.Context, id string) error {
 	// No publish may store the session again after it is gone.
 	m.pubMu.Lock()
 	defer m.pubMu.Unlock()
-	if err := m.store.DeleteSession(ctx, id); err != nil {
+	// Memory is ahead of the store (a taint may not be published yet), and
+	// holding mu keeps a taint from landing between reading it and the delete.
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	known := m.sessions[id] != nil && m.sessions[id].Tainted
+	tainted, err := m.store.DeleteSession(ctx, id, known)
+	if err != nil {
 		return err
 	}
-	m.mu.Lock()
+	if tainted {
+		m.tombstones[id] = true
+	}
 	delete(m.sessions, id)
 	delete(m.transcripts, id)
 	delete(m.deadSince, id)
 	// approvals stays: a card still open closes through ApprovalClosed.
-	m.mu.Unlock()
 	return nil
 }
 

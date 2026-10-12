@@ -237,3 +237,89 @@ func TestParseTableRejectsAutoNoSession(t *testing.T) {
 		t.Fatal("expected error")
 	}
 }
+
+// An app update ships a new table; the user's overrides stay in the DB
+// and are applied to it (6-5).
+func TestOverridesSurviveTableUpdate(t *testing.T) {
+	v1, err := ParseTable([]byte(`{"version": 1, "plugins": {"dev": {"tools": {
+	  "write":  {"level": "ask"},
+	  "read":   {"level": "auto"},
+	  "send":   {"level": "ask"},
+	  "deploy": {"level": "ask"}
+	}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e1 := NewEngine(v1, nil)
+	for tool, level := range map[string]string{"write": LevelBlock, "read": LevelAsk, "send": LevelAuto, "deploy": LevelAuto} {
+		if err := e1.SetOverride("dev", tool, level); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored := e1.Overrides() // what the DB holds
+
+	v2, err := ParseTable([]byte(`{"version": 2, "plugins": {"dev": {"tools": {
+	  "write":  {"level": "auto"},
+	  "read":   {"level": "ask"},
+	  "send":   {"level": "ask", "no_session": true},
+	  "deploy": {"level": "ask"}
+	}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2 := NewEngine(v2, stored)
+	look := func(tool string) Effective {
+		eff, _ := e2.Lookup("dev", tool)
+		return eff
+	}
+	// The default changed; the user's level stays.
+	if eff := look("write"); eff.Level != LevelBlock || !eff.Overridden || eff.DefaultLevel != LevelAuto {
+		t.Errorf("write: %+v", eff)
+	}
+	// The new default happens to equal the user's level: still the user's.
+	if eff := look("read"); eff.Level != LevelAsk || !eff.Overridden {
+		t.Errorf("read: %+v", eff)
+	}
+	// Unchanged rule keeps the override.
+	if eff := look("deploy"); eff.Level != LevelAuto || !eff.Overridden {
+		t.Errorf("deploy: %+v", eff)
+	}
+	// The tool became no_session: the auto override no longer applies (Q33).
+	if eff := look("send"); eff.Level != LevelAsk || eff.Overridden {
+		t.Errorf("send: %+v", eff)
+	}
+	d := e2.DecidePlugin(PluginCall{Plugin: "dev", Tool: "send", SessionID: "claude:s1", UIConnected: true})
+	if d.Outcome != Ask || d.AllowSession || d.Decision == model.DecisionAutoAllowed {
+		t.Errorf("send decision: %+v", d)
+	}
+	if d := e2.DecidePlugin(PluginCall{Plugin: "dev", Tool: "send", SessionID: "claude:s1"}); d.Outcome != Deny {
+		t.Errorf("send without UI: %+v", d)
+	}
+	if got := e2.IgnoredOverrides(); !slices.Equal(got, []string{"dev_send=auto"}) {
+		t.Errorf("ignored: %v", got)
+	}
+	// The row is kept: a later table without no_session applies it again.
+	if e2.Overrides()["dev_send"] != LevelAuto {
+		t.Fatalf("ignored override dropped: %v", e2.Overrides())
+	}
+	v3, _ := ParseTable([]byte(`{"version": 3, "plugins": {"dev": {"tools": {"send": {"level": "ask"}}}}}`))
+	if eff, _ := NewEngine(v3, e2.Overrides()).Lookup("dev", "send"); eff.Level != LevelAuto || !eff.Overridden {
+		t.Errorf("send after no_session dropped: %+v", eff)
+	}
+	// Choosing the default level resets, including an ignored override.
+	if err := e2.SetOverride("dev", "read", LevelAsk); err != nil {
+		t.Fatal(err)
+	}
+	if err := e2.SetOverride("dev", "send", LevelAsk); err != nil {
+		t.Fatal(err)
+	}
+	if over := e2.Overrides(); over["dev_read"] != "" || over["dev_send"] != "" {
+		t.Fatalf("reset to default kept a row: %v", over)
+	}
+	if eff := look("read"); eff.Overridden {
+		t.Errorf("read after reset: %+v", eff)
+	}
+	if len(e2.IgnoredOverrides()) != 0 {
+		t.Errorf("ignored after reset: %v", e2.IgnoredOverrides())
+	}
+}

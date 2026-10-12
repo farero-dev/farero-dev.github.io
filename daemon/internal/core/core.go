@@ -105,6 +105,9 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		toolIndex:  map[string]exposedTool{},
 		hidden:     map[string]string{},
 	}
+	for _, ov := range c.policy.IgnoredOverrides() {
+		o.Log.Warn("policy override ignored: the tool now requires approval every time (Q33)", "override", ov)
+	}
 	c.broker = broker.New(c, o.ApprovalTimeout)
 	c.sessions, err = session.NewManager(ctx, o.Store, func(s model.Session) {
 		c.hub.broadcast(ipc.TypeSessionUpdated, s)
@@ -347,19 +350,31 @@ func sessionLabel(s model.Session) string {
 
 func (c *Core) resultLimit(ctx context.Context) int {
 	v, _ := c.store.Setting(ctx, settingResultLimit)
-	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+	if n, err := strconv.Atoi(v); err == nil && validResultLimit(n) {
 		return n
 	}
 	return store.DefaultResultLimit
 }
 
-// logCall writes an audit log row and returns its id (0 if it failed).
-func (c *Core) logCall(ctx context.Context, call model.Call) int64 {
+func validResultLimit(n int) bool {
+	return n >= store.MinResultLimit && n <= store.MaxResultLimit
+}
+
+// logCall writes an audit log row and returns its id (0 if it failed). s is
+// the call's session as it was when the call came in (nil for an unknown
+// session): the user may have deleted it while the call waited for its card,
+// and the row needs the session back (5-1).
+func (c *Core) logCall(ctx context.Context, call model.Call, s *model.Session) int64 {
 	limit := c.resultLimit(ctx)
 	call.ResultBytes = len(call.ResultText)
 	call.ResultText = store.TruncateUTF8(call.ResultText, limit)
 	if len(call.Input) == 0 {
 		call.Input = json.RawMessage(`{}`)
+	}
+	if s != nil && call.SessionID != "" {
+		if err := c.sessions.Revive(ctx, *s); err != nil {
+			c.log.Error("revive session", "session", s.ID, "err", err)
+		}
 	}
 	id, err := c.store.InsertCall(ctx, call)
 	if err != nil {

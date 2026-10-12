@@ -64,16 +64,55 @@ func (s *Store) Sessions(ctx context.Context) ([]model.Session, error) {
 }
 
 // DeleteSession removes a session together with its hook events, calls and
-// their search index entries.
-func (s *Store) DeleteSession(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id)
+// their search index entries. A tainted session (as stored, or tainted as
+// the caller knows it) leaves a tombstone in the same transaction: the
+// agent may still be running, or come back with `claude --resume`, with the
+// untrusted content in its context (Q39). Tombstones are never pruned. It
+// reports whether it left one.
+func (s *Store) DeleteSession(ctx context.Context, id string, tainted bool) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	defer tx.Rollback()
+	var stored int
+	err = tx.QueryRowContext(ctx, `SELECT tainted FROM sessions WHERE id = ?`, id).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
 	}
-	return nil
+	if err != nil {
+		return false, err
+	}
+	tainted = tainted || stored != 0
+	if tainted {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO deleted_taint(session_id, deleted_at) VALUES(?, ?)
+ON CONFLICT(session_id) DO UPDATE SET deleted_at = excluded.deleted_at`, id, ms(time.Now())); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+		return false, err
+	}
+	return tainted, tx.Commit()
+}
+
+// TaintTombstones returns the ids of deleted sessions that were tainted.
+func (s *Store) TaintTombstones(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id FROM deleted_taint`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 // AddHookEvent records a hook event for a session.

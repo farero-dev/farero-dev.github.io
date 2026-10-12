@@ -122,7 +122,9 @@ func NewEngine(t *Table, overrides map[string]string) *Engine {
 type Effective struct {
 	Rule
 	DefaultLevel string `json:"default_level"`
-	Overridden   bool   `json:"overridden"`
+	// Overridden is true when the user's stored level applies, even one
+	// that equals DefaultLevel after a table update.
+	Overridden bool `json:"overridden"`
 }
 
 // Lookup returns the effective rule for a plugin tool.
@@ -142,11 +144,45 @@ func (e *Engine) lookupLocked(plugin, tool string) (Effective, bool) {
 		return Effective{}, false
 	}
 	eff := Effective{Rule: r, DefaultLevel: r.Level}
-	if lv, ok := e.overrides[ToolKey(plugin, tool)]; ok && lv != r.Level {
+	// A stored override applies even when it equals the current default:
+	// the user chose it, and it must outlive a later table change (6-5).
+	if lv, ok := e.overrides[ToolKey(plugin, tool)]; ok && applies(r, lv) {
 		eff.Level = lv
 		eff.Overridden = true
 	}
 	return eff, true
+}
+
+// applies reports whether a stored override can take effect on a rule. An
+// auto override saved before a table update made the tool no_session must
+// not lift "approve every time" (Q33); it is kept, and applies again if a
+// later table drops no_session.
+func applies(r Rule, level string) bool {
+	switch level {
+	case LevelAsk, LevelBlock:
+		return true
+	case LevelAuto:
+		return !r.NoSession
+	}
+	return false
+}
+
+// IgnoredOverrides lists the stored overrides of classified tools that do
+// not take effect (see applies), as "<plugin>_<tool>=<level>", sorted.
+func (e *Engine) IgnoredOverrides() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []string
+	for p, pt := range e.table.Plugins {
+		for name, r := range pt.Tools {
+			key := ToolKey(p, name)
+			if lv, ok := e.overrides[key]; ok && !applies(r, lv) {
+				out = append(out, key+"="+lv)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Exposed reports whether the tool is listed to agents: classified and not
@@ -157,8 +193,8 @@ func (e *Engine) Exposed(plugin, tool string) bool {
 }
 
 // SetOverride changes a tool's level. A no_session tool may only be ask or
-// block: the user cannot lift "approve every time" (Q33). An empty level
-// resets to the table default.
+// block: the user cannot lift "approve every time" (Q33). An empty level, or
+// the table's default level, resets to the table default.
 func (e *Engine) SetOverride(plugin, tool, level string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

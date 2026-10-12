@@ -97,6 +97,14 @@ CREATE TABLE settings (
 	value TEXT NOT NULL
 );
 `,
+	// v2: a deleted session that was tainted leaves its id here, so the
+	// session starts tainted when its agent sends another event (Q39).
+	`
+CREATE TABLE deleted_taint (
+	session_id TEXT PRIMARY KEY,
+	deleted_at INTEGER NOT NULL
+);
+`,
 }
 
 // SchemaVersion is the user_version a fully migrated database has.
