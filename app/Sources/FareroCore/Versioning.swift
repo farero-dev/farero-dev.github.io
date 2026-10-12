@@ -99,15 +99,20 @@ public enum UpdateCheck {
         public var url: URL
     }
 
-    /// Whether this build takes part: a real version, not a dev build or an
-    /// unfilled Info.plist template.
-    public static func isCheckable(currentVersion: String?) -> Bool {
-        guard let v = currentVersion, !v.isEmpty, v != "dev", !v.contains("__") else { return false }
-        return SemVer(v) != nil
+    /// Whether this build takes part: a real version, not a dev build
+    /// ("dev", 0.0.0 and its variants such as the e2e scripts' "0.0.0-e2e")
+    /// or an unfilled Info.plist template, and not a development run
+    /// (`FARERO_SOCKET` set, as the e2e scripts run build/Farero.app).
+    public static func isCheckable(currentVersion: String?, environment: [String: String] = [:]) -> Bool {
+        if let s = environment["FARERO_SOCKET"], !s.isEmpty { return false }
+        guard let v = currentVersion, !v.isEmpty, v != "dev", !v.contains("__"), let semver = SemVer(v) else { return false }
+        return (semver.major, semver.minor, semver.patch) != (0, 0, 0)
     }
 
     /// The newer release, or nil when the current version is up to date,
-    /// not checkable, or the release is a draft or prerelease.
+    /// not checkable, or the release is a draft or prerelease. SemVer ranks
+    /// a release above its prereleases (semver.org 11), so a 0.1.0-beta.1
+    /// build is told about 0.1.0 and a 0.1.0 build never about a beta.
     public static func newer(release: Release, currentVersion: String?) -> Available? {
         guard isCheckable(currentVersion: currentVersion), let current = currentVersion.flatMap(SemVer.init),
               !release.draft, !release.prerelease,

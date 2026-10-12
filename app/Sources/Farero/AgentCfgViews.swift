@@ -34,7 +34,15 @@ final class AgentCfgModel {
         }
     }
 
+    /// A translocated app must not register: farerod would record the hook
+    /// path of a copy that is gone on the next launch (Q63 cannot fix that).
+    var registrationBlocked: Bool { DaemonRegistrar.isTranslocated }
+
     func preparePlan() async {
+        guard !registrationBlocked else {
+            error = DaemonRegistrar.translocatedMessage
+            return
+        }
         await run {
             let reply = try await self.app.client.request(MessageType.agentCfgPlan, AgentRef())
             if case .agentCfgPlan(let p) = reply.payload {
@@ -45,6 +53,11 @@ final class AgentCfgModel {
     }
 
     func apply() async {
+        guard !registrationBlocked else {
+            error = DaemonRegistrar.translocatedMessage
+            showingPlan = false
+            return
+        }
         await run {
             // Running the claude CLI can take a while.
             let reply = try await self.app.client.request(MessageType.agentCfgApply, AgentRef(), timeout: .seconds(90))
@@ -93,6 +106,9 @@ struct AgentCfgPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if model.registrationBlocked {
+                Banner(text: DaemonRegistrar.translocatedMessage, style: .warning)
+            }
             if let message = model.status?.message, !message.isEmpty {
                 Banner(text: message, style: .info)
             }
@@ -141,7 +157,7 @@ struct AgentCfgPanel: View {
                     Task { await model.preparePlan() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.status?.cliFound != true || model.busy)
+                .disabled(model.status?.cliFound != true || model.busy || model.registrationBlocked)
             }
         }
         .task {

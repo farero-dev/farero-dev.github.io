@@ -503,3 +503,26 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
   - 최소화된 창 복원: 이 맥의 Terminal은 AppleScript `set miniaturized ... to true`를 무시해(값도 계속 false) 창을 최소화할 수 없었다. 스크립트는 항상 `set miniaturized of w to false`를 보낸다.
   - 사람이 실제로 노치 행을 클릭하는 확인. 입력 이벤트를 만들 손쉬운 사용 권한이 없어 제어 파이프 `jump`로 같은 코드를 지나게 했다.
   - Farero 자신의 자동화 권한 확인 창: 스크립트가 앱을 직접 실행하면 확인 창 없이 권한 확인이 바로 0을 돌려준다. Apple Event가 스크립트를 띄운 앱(Orca)의 것으로 처리되는 것으로 보인다(추정). `E2E_MANUAL=1`은 `open`으로 앱을 띄워 사람이 확인 창에 답하고, 노치의 세션 행을 직접 클릭하고, 카드 단축키를 누르게 한다(아직 실행하지 않음).
+
+### M8 배포 (준비)
+
+앱 2단계에서 온보딩, 업데이트 확인, 버전 불일치 재등록, `release.yml`, README가 이미 있었다. 이번에는 빈틈을 메우고 첫 프리릴리스(`v0.1.0-beta.1`)를 준비했다.
+
+**설치 위치 (App Translocation)**
+- 받은 zip을 Downloads에서 바로 열면 macOS가 `…/AppTranslocation/<uuid>/d/Farero.app` 임시 사본으로 실행한다. 이전에는 이 경로가 LaunchAgent plist에 기록됐고, 그 farerod의 경로 자동 수정(Q63)이 Claude Code 훅 경로까지 사라질 사본으로 바꿨다. 이미 `/Applications`에 설치한 사람이 새 버전을 Downloads에서 열기만 해도 생긴다.
+- `InstallLocation`(경로에 `/AppTranslocation/`)으로 판정하고, `SecTranslocateIsTranslocatedURL`(dlsym)은 보조로만 쓴다. Translocation이면 LaunchAgent 등록·재등록·kickstart와 Claude Code 등록을 하지 않고, "응용 프로그램 폴더로 옮긴 뒤 다시 열기" 안내(알림 창, 온보딩, 데몬 상태, 메뉴)와 Finder에서 원래 파일 보기를 보여 준다. 개발 모드(`FARERO_SOCKET`)는 그대로다.
+
+**온보딩·업데이트 확인**
+- 데몬 단계는 연결될 때까지 "다음"을 막는다(Claude Code 등록에 데몬이 필요하다). 게이트웨이가 아직이면 키체인 대기 가능성을 알린다. 키체인(업데이트마다 다시 묻는다)과 자동화(첫 점프 때 묻는다) 안내를 넣었다.
+- 온보딩 완료 표시는 `UserDefaults(suiteName: 앱 번들 ID)` 대신 `.standard`에 둔다(Apple은 자기 번들 ID를 suite 이름으로 쓰지 않게 한다). 번들 앱에서는 같은 plist라 예전 값도 읽힌다.
+- 업데이트 확인을 끄면 메뉴의 "새 버전" 항목을 바로 지운다. `0.0.0*` 버전(e2e 빌드)과 개발 모드는 GitHub에 묻지 않는다. 프리릴리스 순서는 semver.org 규칙(0.1.0-beta.1 < 0.1.0)이 이미 맞았고 테스트를 더했다. `releases/latest`는 프리릴리스를 주지 않으므로 베타 사용자는 0.1.0이 나오면 알림을 받는다.
+
+**릴리스**
+- `release.yml`: 태그에 `-`가 있으면 `--prerelease`. CI와 같은 검사(go vet, `-race`, LighthouseKit 테스트)를 더했고, `Farero-<ver>.zip.sha256`과 설치 안내 노트(`.github/release-notes.md`)를 함께 올린다.
+- 앱 아이콘: LighthouseKit의 `lighthouse-icon`이 등대(`waitingInput` 정지 화면)를 1024px로 그리고 `scripts/make-icon.sh`가 `app/Resources/AppIcon.icns`를 만든다. CI가 다시 그리지 않도록 icns를 저장소에 둔다.
+- README: 설치(먼저 `/Applications`로 옮기기), 업데이트, 제거, 문제 해결. `docs/release-checklist.md`: 릴리스 절차와 새 macOS 계정에서 시나리오 A–E를 확인하는 체크리스트.
+
+**로컬 확인 (`scripts/build.sh 0.1.0-beta.1`)**
+- 세 실행 파일 모두 `x86_64 arm64`, ad-hoc 서명 `--strict` 검증 통과, `spctl`은 `rejected`(미공증, 예상대로). zip 약 17MB, 풀어도 서명 유지.
+- Intel(Q37): Rosetta로 farerod·farero-hook `--version`이 `0.1.0-beta.1`, x86_64 farerod(`--dev`)와 앱이 개발 모드로 떠 있었다.
+- 확인하지 못한 것: Gatekeeper "그래도 열기"와 Translocation 안내는 격리 속성이 붙은 파일이 필요해 새 계정 확인(체크리스트 b)에서 본다. 첫 설치에서 키체인 확인 창이 뜨는지도 거기서 기록한다(farerod가 만든 항목은 자기가 읽으므로 뜨지 않을 것으로 본다).

@@ -27,10 +27,14 @@ If the app isn't running, Claude Code is never blocked:
 
 ## Install
 
-1. Download `Farero-<version>.zip` from [Releases](https://github.com/farero-dev/farero-dev.github.io/releases), unzip it, and move `Farero.app` to `/Applications`.
-2. The app is not notarized yet, so macOS blocks the first launch. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**. Since macOS Sequoia, Control-click › Open no longer bypasses this.
-3. On first launch farero installs its daemon, `farerod`, as a LaunchAgent (`~/Library/LaunchAgents/dev.farero.farerod.plist`), and macOS shows a "Background Items Added" notification. Keep it on in **System Settings › General › Login Items**. If it is off, farero tells you and opens that page.
-4. In the app, register farero with Claude Code. farero shows a diff of the changes and asks for confirmation before writing anything.
+Requirements: macOS 15 or later (Apple silicon or Intel) and Claude Code v2.1.203 or later.
+
+1. Download `Farero-<version>.zip` from [Releases](https://github.com/farero-dev/farero-dev.github.io/releases) and unzip it. To check the download, compare `shasum -a 256 Farero-<version>.zip` with the `.sha256` file next to it.
+2. **Move `Farero.app` to `/Applications` before you open it.** If you open it from Downloads, macOS runs a translocated copy from a random read-only path, and farero refuses to register its daemon from there and asks you to move it.
+3. The app is not notarized yet, so macOS blocks the first launch. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**. Since macOS 15, Control-click › Open no longer bypasses this.
+4. On first launch farero installs its daemon, `farerod`, as a LaunchAgent (`~/Library/LaunchAgents/dev.farero.farerod.plist`), and macOS shows a "Background Items Added" notification. Keep it on in **System Settings › General › Login Items & Extensions**. If it is off, farero tells you and opens that page.
+5. If macOS asks whether `farerod` may use its Keychain items (the gateway secret and plugin tokens), enter your login password and choose **Always Allow**. It asks again after every update. Until you answer, the app and hooks still work, but the gateway waits.
+6. In the app, register farero with Claude Code (**Settings › Claude Code**, or the setup assistant). farero shows a diff of the changes and asks for confirmation before writing anything.
 
 ### What farero changes in Claude Code
 
@@ -57,12 +61,52 @@ farero backs up the original file first. **Remove settings** deletes only what f
 - The only request the app makes on its own is checking GitHub Releases for a new version. You can turn it off in Settings.
 - Tokens and keys never appear in logs or on screen.
 
+## Updating
+
+1. Quit Farero from its menu.
+2. Replace `/Applications/Farero.app` with the new one and open it.
+3. The app restarts `farerod` on its own when the daemon in the new bundle differs from the running one. Pending approvals finish first.
+4. macOS asks for Keychain access again after every update (ad-hoc signing changes the code signature). Enter your password and choose **Always Allow**.
+
+The app checks GitHub Releases once at launch and then once a day, and shows a notice when a newer version exists. Turn it off in **Settings › 일반 › 업데이트 확인**. This is the only network request the app makes on its own.
+
+## Uninstall
+
+1. In the app, open **Settings › Claude Code** and click **설정 제거…**, then confirm with **설정 제거**. This removes only what farero added to Claude Code (hooks, `mcp__farero__*` rule, the `farero` MCP server).
+2. Quit Farero from its menu.
+3. Remove the daemon and the app:
+
+```sh
+launchctl bootout gui/$(id -u)/dev.farero.farerod
+rm ~/Library/LaunchAgents/dev.farero.farerod.plist
+rm -rf /Applications/Farero.app
+```
+
+4. Delete the data (database, config, socket, backups of your Claude Code files) and the daemon log: `rm -rf ~/Library/Application\ Support/Farero ~/Library/Logs/Farero`. This deletes the audit log.
+5. Delete the Keychain items. All of them have the service `dev.farero.farerod`. Their accounts are `gateway.secret` and `plugin.<plugin>.<what>` (for example `plugin.github.token`, `plugin.railway.token`, `plugin.railway.setup`, `plugin.resend.token`, `plugin.resend.setup`, `plugin.gmail.token`, `plugin.gmail.client`). Run once per item, or find them in Keychain Access by searching for `dev.farero.farerod`:
+
+```sh
+security delete-generic-password -s dev.farero.farerod -a gateway.secret
+security delete-generic-password -s dev.farero.farerod -a plugin.github.token
+# ...and so on for each plugin you connected
+```
+
+6. Delete the app's preferences: `defaults delete dev.farero.Farero` (and `rm -f ~/Library/Preferences/dev.farero.Farero.plist` if it remains).
+
+## Troubleshooting
+
+- **The daemon is not running.** Open **System Settings › General › Login Items & Extensions** and allow Farero to run in the background. The menu item **데몬 상태…** shows what the app sees. If registration failed, the menu offers **로그인 항목에서 데몬 허용…**.
+- **The gateway does not start.** farerod reads the Keychain after it opens its socket. Until you answer the Keychain prompt, the gateway waits. If you chose **Deny**, the menu shows a gateway error and plugin tools are missing; restart the daemon to be asked again: `launchctl kickstart -k gui/$(id -u)/dev.farero.farerod`.
+- **Claude Code is too old.** farero does not register with Claude Code older than v2.1.203. Update Claude Code, then register again.
+- **You moved the app.** Hook and MCP paths point into the app bundle. On the next launch farero fixes the paths it added (after a backup) and tells you. If **Settings › Claude Code** still shows a stale path, click **다시 등록…**.
+- **A card was answered by something else.** Other apps can register their own `PermissionRequest` hook in your Claude Code settings, and their answer can override farero's. Check `~/.claude/settings.json` for other hooks. Answering at the terminal first also wins over farero; the log shows "취소됨 · 터미널에서 먼저 답함".
+
 ## Development
 
 Requirements:
 - macOS 15 or later
 - Xcode with Swift 6
-- Go 1.26 or later
+- Go 1.27 (Homebrew; `modernc.org/sqlite` needs Go 1.26 or later)
 
 ```sh
 # daemon (Go)

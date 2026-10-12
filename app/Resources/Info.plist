@@ -10,6 +10,8 @@
 	<string>dev.farero.Farero</string>
 	<key>CFBundleExecutable</key>
 	<string>Farero</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>Farero</string>
 	<key>CFBundleDisplayName</key>

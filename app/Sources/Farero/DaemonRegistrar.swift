@@ -13,6 +13,9 @@ final class DaemonRegistrar {
     enum Status: Equatable {
         /// Development run (`FARERO_SOCKET` set, or not inside an .app bundle).
         case skipped(String)
+        /// Running from macOS's App Translocation copy of a quarantined
+        /// download (`InstallLocation`): nothing is registered by that path.
+        case translocated
         case enabled
         case notRegistered
         case failed(String)
@@ -20,6 +23,7 @@ final class DaemonRegistrar {
         var label: String {
             switch self {
             case .skipped(let why): "등록 안 함 (\(why))"
+            case .translocated: "등록 안 함: 앱을 응용 프로그램 폴더로 옮긴 뒤 다시 여세요"
             case .enabled: "로그인 항목 등록됨"
             case .notRegistered: "로그인 항목 미등록"
             case .failed(let m): "등록 실패: \(m)"
@@ -30,10 +34,14 @@ final class DaemonRegistrar {
         var needsAttention: Bool {
             switch self {
             case .notRegistered, .failed: true
-            case .skipped, .enabled: false
+            case .skipped, .translocated, .enabled: false
             }
         }
     }
+
+    /// What the user must do while the app runs translocated.
+    static let translocatedTitle = "Farero를 응용 프로그램 폴더로 옮겨 주세요"
+    static let translocatedMessage = "다운로드한 앱을 그 자리에서 열면 macOS가 임시 위치에서 실행하므로 farero 데몬과 Claude Code 훅을 등록할 수 없습니다. Farero.app을 응용 프로그램 폴더로 옮긴 뒤 다시 열어 주세요."
 
     /// The plist SMAppService registered in earlier builds. It stays in the
     /// bundle only so that registration can be removed.
@@ -56,12 +64,31 @@ final class DaemonRegistrar {
         return nil
     }
 
+    /// Where this bundle runs from. The path check decides on its own; the
+    /// Security framework's answer only adds to it.
+    static let installLocation: InstallLocation = {
+        let url = Bundle.main.bundleURL
+        let byPath = InstallLocation.classify(bundlePath: url.path, home: FileManager.default.homeDirectoryForCurrentUser)
+        return byPath == .elsewhere && Translocation.isTranslocated(url) == true ? .translocated : byPath
+    }()
+
+    /// A translocated run registers nothing (not even when `FARERO_SOCKET`
+    /// is set, so dev mode stays as it is: the e2e scripts never run from a
+    /// quarantined zip).
+    static var isTranslocated: Bool { skipReason() == nil && installLocation == .translocated }
+
     /// On launch: installs and loads the LaunchAgent, and restarts farerod
     /// when this bundle ships a different one (an update or a rebuild).
     /// `onChange` runs when the status is known.
     func registerIfNeeded(onChange: @escaping @MainActor () -> Void = {}) {
         if let why = Self.skipReason() {
             status = .skipped(why)
+            return
+        }
+        if Self.isTranslocated {
+            status = .translocated
+            // The onboarding window (first launch) opens after this returns.
+            Task { @MainActor [weak self] in self?.showTranslocationAlert() }
             return
         }
         Task { [weak self] in
@@ -126,6 +153,10 @@ final class DaemonRegistrar {
             status = .skipped(why)
             return
         }
+        if Self.isTranslocated {
+            status = .translocated
+            return
+        }
         if case .failed = status { return }
         status = Self.launchctlSync("print", Self.target) == 0 ? .enabled : .notRegistered
     }
@@ -134,6 +165,7 @@ final class DaemonRegistrar {
     /// version). Returns an error message on failure.
     func reregister() async -> String? {
         if Self.skipReason() != nil { return "개발 모드에서는 다시 등록하지 않음" }
+        if Self.isTranslocated { return "앱을 응용 프로그램 폴더로 옮긴 뒤 다시 열어야 합니다" }
         let r = await Self.launchctl("kickstart", "-k", Self.target)
         refresh()
         return r.status == 0 ? nil : r.output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -182,6 +214,32 @@ final class DaemonRegistrar {
         SMAppService.openSystemSettingsLoginItems()
     }
 
+    /// Shows the bundle the user opened in Finder: the download itself when
+    /// the translocated copy can be traced back to it, so that they can drag
+    /// that one into Applications.
+    func revealInFinder() {
+        let url = Bundle.main.bundleURL
+        NSWorkspace.shared.activateFileViewerSelecting([Translocation.originalURL(url) ?? url])
+    }
+
+    private func showTranslocationAlert() {
+        guard !alertShown else { return }
+        alertShown = true
+        let alert = NSAlert()
+        alert.messageText = Self.translocatedTitle
+        alert.informativeText = Self.translocatedMessage
+        alert.addButton(withTitle: "Finder에서 보기")
+        alert.addButton(withTitle: "종료")
+        NSApp.activate()
+        // Either way the app keeps running as a UI client of an already
+        // installed farerod, which is harmless; only registration is off.
+        if alert.runModal() == .alertFirstButtonReturn {
+            revealInFinder()
+        } else {
+            NSApp.terminate(nil)
+        }
+    }
+
     private func showFailureAlert() {
         guard !alertShown else { return }
         alertShown = true
@@ -194,5 +252,35 @@ final class DaemonRegistrar {
         if alert.runModal() == .alertFirstButtonReturn {
             openLoginItemsSettings()
         }
+    }
+}
+
+/// App Translocation as the Security framework sees it. The two functions
+/// are not in the SDK headers (LetsMove and others look them up the same
+/// way), so a missing symbol just means "unknown" and the path check in
+/// `InstallLocation` decides alone.
+enum Translocation {
+    private typealias IsTranslocatedFn = @convention(c) (CFURL, UnsafeMutablePointer<Bool>, UnsafeMutablePointer<Unmanaged<CFError>?>?) -> DarwinBoolean
+    private typealias OriginalPathFn = @convention(c) (CFURL, UnsafeMutablePointer<Unmanaged<CFError>?>?) -> Unmanaged<CFURL>?
+
+    private static func symbol(_ name: String) -> UnsafeMutableRawPointer? {
+        guard let handle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY) else { return nil }
+        return dlsym(handle, name)
+    }
+
+    /// nil when the framework cannot say.
+    static func isTranslocated(_ url: URL) -> Bool? {
+        guard let sym = symbol("SecTranslocateIsTranslocatedURL") else { return nil }
+        let fn = unsafeBitCast(sym, to: IsTranslocatedFn.self)
+        var result = false
+        guard fn(url as CFURL, &result, nil).boolValue else { return nil }
+        return result
+    }
+
+    /// The bundle the translocated copy was made from (the download).
+    static func originalURL(_ url: URL) -> URL? {
+        guard let sym = symbol("SecTranslocateCreateOriginalPathForURL") else { return nil }
+        let fn = unsafeBitCast(sym, to: OriginalPathFn.self)
+        return fn(url as CFURL, nil)?.takeRetainedValue() as URL?
     }
 }

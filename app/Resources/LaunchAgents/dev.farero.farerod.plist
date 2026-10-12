@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Farero.app/Contents/Library/LaunchAgents/dev.farero.farerod.plist,
-     registered by the app with SMAppService.agent(plistName:) (Q55). -->
+<!-- Farero.app/Contents/Library/LaunchAgents/dev.farero.farerod.plist.
+     Earlier builds registered it with SMAppService.agent(plistName:) (Q55);
+     farerod now runs from ~/Library/LaunchAgents/dev.farero.farerod.plist,
+     which the app writes (see LaunchAgent). This copy stays in the bundle
+     only so the app can unregister the old SMAppService registration
+     (DaemonRegistrar). -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
