@@ -144,11 +144,13 @@ struct DaemonStatusView: View {
                 Banner(text: DaemonRegistrar.translocatedMessage, style: .warning)
                 Button("Finder에서 보기") { registrar.revealInFinder() }
             }
+            LabeledContent("로그인할 때 열기") { Text(model.openAtLogin.status.label) }
         }
         .formStyle(.grouped)
         .onAppear {
             registrar.refresh()
             model.registrationLabel = registrar.status.label
+            model.openAtLogin.refresh()
         }
     }
 }

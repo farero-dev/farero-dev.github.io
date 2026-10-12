@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             model.registrationLabel = model.registrar.status.label
         }
         model.registrationLabel = model.registrar.status.label
+        // Open the app at login too, unless the user turned it off (Q85).
+        model.openAtLogin.apply()
         windows.showOnboardingIfFirstLaunch()
         windows.openDebugWindows()
     }
@@ -37,6 +39,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         model.stop()
     }
+}
+
+// The login LaunchAgent runs this executable with AppLoginItem.argument.
+// Hand over to LaunchServices, which opens the app as if the user had and
+// leaves an app that already runs alone. If exec fails, start here instead.
+if AppLoginItem.isLoginLaunch(arguments: CommandLine.arguments) {
+    let open = "/usr/bin/open"
+    var argv = ([open] + AppLoginItem.openArguments(bundlePath: Bundle.main.bundlePath)).map { strdup($0) } + [nil]
+    execv(open, &argv)
 }
 
 let app = NSApplication.shared

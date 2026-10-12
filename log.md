@@ -533,4 +533,19 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
 - `log` 단계는 감사 로그로 시나리오 A–D를 판정한다. 에이전트 도구는 카드에 답하면 `reason`에 답(`allow_session` 또는 빈 값)만 남고 물은 이유(오염)는 남지 않아서, C의 "오염 뒤 셸 명령 다시 물음"은 같은 세션에서 세션 허용됐던 같은 명령(`$.command`)이 오염 뒤 카드로 답해졌는지로 본다. 로그·DB·설정 파일에 토큰 모양 문자열이 있으면 실패로 본다.
 - 시험: 실제 `v0.1.0-beta.1` zip(체크섬·격리 속성·서명·Universal 통과), e2e DB 사본으로 A–D 판정(오염 뒤 세션 허용과 토큰 노출을 일부러 넣으면 FAIL), 실제 `agentcfg` 등록·제거 결과로 `registered`·`removed`, 이 맥의 데몬으로 `installed`. `translocated`는 Gatekeeper 창이 떠서 개발 계정에서 실행하지 않았다.
 - 체크리스트: ▶ 표시에서 스크립트를 실행하도록 넣었고, A와 C는 같은 세션에서 이어서 하도록 적었다(C의 마지막 항목이 A의 세션 허용을 쓴다).
-- 결정 필요: 앱(UI)은 로그인 때 스스로 뜨지 않는다(데몬만 LaunchAgent, 명세에도 앱 자동 실행은 없음). 앱이 꺼져 있으면 승인 단계 게이트웨이 호출이 자동 거부되므로 재부팅 뒤 앱을 직접 열어야 한다. 에이전트 도구 카드의 물은 이유를 로그에 남길지도 정해야 한다.
+- 결정 필요: 앱(UI)은 로그인 때 스스로 뜨지 않는다(데몬만 LaunchAgent, 명세에도 앱 자동 실행은 없음). 앱이 꺼져 있으면 승인 단계 게이트웨이 호출이 자동 거부되므로 재부팅 뒤 앱을 직접 열어야 한다 → 아래 "M8 로그인할 때 앱 열기"(Q85). 에이전트 도구 카드의 물은 이유를 로그에 남길지는 아직 정해야 한다.
+
+### M8 로그인할 때 앱 열기 (Q85)
+
+앱이 꺼져 있으면 승인이 필요한 게이트웨이 호출은 자동 거부되는데, 로그인 때 스스로 뜨는 것은 데몬뿐이었다. 사용자 요청으로 앱도 로그인 때 열리게 했다. 기본은 켜짐이고 설정에서 끈다.
+
+- 방식: farerod와 같은 `~/Library/LaunchAgents` plist(`dev.farero.app.plist`). `SMAppService.mainApp`은 쓰지 않았다. ad-hoc 서명에서 SMAppService 에이전트가 업데이트 뒤 cdhash 때문에 거부된 일(Q55)이 있었고, 메인 앱 항목이 업데이트 뒤에도 열리는지는 확인한 적이 없다. 경로 기반 plist는 업데이트 뒤에도 그대로 동작함을 이미 확인했다(e5-launchagent).
+- plist: `ProgramArguments` = `[<앱>/Contents/MacOS/Farero, --open-at-login]`, `RunAtLoad`, `LimitLoadToSessionType` Aqua, `ProcessType` Interactive. `KeepAlive`는 없다(메뉴에서 종료하면 다음 로그인까지 꺼져 있다).
+- 넘겨주기: launchd가 실행한 프로세스는 `main.swift` 맨 앞에서 `--open-at-login`을 보고 `execv("/usr/bin/open", ["-g", <번들>])`로 바뀐다. LaunchServices가 사용자가 연 것처럼 앱을 띄우므로, 이미 떠 있으면(로그아웃 전 창 다시 열기 등) 두 번째 앱이 생기지 않고, TCC·자동화 권한도 앱 자신의 것이다. plist가 `/usr/bin/open`이 아니라 앱 실행 파일을 가리키므로 로그인 항목에 `open` 대신 앱 이름이 보일 것으로 본다(확인은 새 계정에서).
+- 쓰기만 하고 `launchctl bootstrap`은 하지 않는다. 지금 올리면 RunAtLoad로 실행 중인 앱을 다시 열게 된다. launchd는 다음 로그인 때 읽는다. 끄면 plist만 지운다(로그인 때 올라온 작업은 이미 끝났으므로 bootout할 것이 없다).
+- 선택은 UserDefaults `openAtLogin`(없으면 켜짐)에 둔다. 데몬 설정(`settings` 표)이 아닌 이유: 앱 자신의 실행이고, 데몬이 꺼져 있을 때도 바꿀 수 있어야 한다. 앱을 실행할 때마다 선택에 맞춰 plist를 쓰거나 지우고, 앱 위치가 바뀌었으면 다시 쓴다(Q63과 같은 방식). 개발 모드(`FARERO_SOCKET`)와 Translocation 사본에서는 아무것도 하지 않는다.
+- 화면: 설정 › 일반 맨 위와 설정 도우미 1단계에 "로그인할 때 Farero 열기" 스위치. 시스템 설정의 로그인 항목에서 꺼 두면 `SMAppService.statusForLegacyPlist`가 `requiresApproval`을 돌려주므로 경고와 "로그인 항목 설정 열기"를 보인다. 데몬 상태 창에도 상태 줄을 더했다.
+- 코드: `FareroCore/AppLoginItem.swift`(plist, 판정, 넘겨주기 인자), `Farero/OpenAtLogin.swift`(적용·상태·스위치), `main.swift`(넘겨주기).
+- 시험: FareroCore 테스트 148개 통과(새 스위트 "App login item": plist 키, 켜짐 기본값, 쓰기·지우기·이동 판정, 넘겨주기 인자). 넘겨주기는 디버그 빌드 실행 파일을 `CFBundleExecutable`이 마커만 남기는 스크립트인 임시 번들에 넣어 `--open-at-login`으로 실행했다: 종료 코드 0, LaunchServices가 번들을 띄웠다(부모 PID 1). 실제 앱을 이 맥에서 띄우면 개발 계정의 farerod 등록을 바꾸므로 앱 전체 흐름은 새 계정 확인에서 본다.
+- `release-check.sh`: `installed`·`reboot`이 앱 plist(경로, `--open-at-login`, RunAtLoad, KeepAlive 없음, 로그인 항목에서 꺼짐 여부)를 보고, `reboot`은 launchd가 로그인 때 `dev.farero.app`을 올렸는지와 Farero가 재시동 뒤 시작됐는지를 실패 조건으로 본다. `translocated`·`pre`·`uninstalled`는 앱 plist와 작업이 없어야 한다. README와 체크리스트의 제거 절차에 `bootout gui/<uid>/dev.farero.app`과 plist 삭제를 더했다.
+- 확인 못 한 것(새 계정에서): 재부팅 뒤 실제로 열리는지, 로그인 항목에 어떤 이름으로 보이는지, 시스템 설정에서 끄면 `statusForLegacyPlist`와 `launchctl print-disabled`가 어떻게 보이는지.
