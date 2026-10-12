@@ -371,6 +371,11 @@ func (c *Core) logCall(ctx context.Context, call model.Call, s *model.Session) i
 	if len(call.Input) == 0 {
 		call.Input = json.RawMessage(`{}`)
 	}
+	// The input gets the same per-call budget as the result (Q46 names
+	// only the result; the input is bounded by the same user setting so
+	// one knob rules row size and FTS indexing time). The upstream call and
+	// the policy decision used the full input before this point.
+	call.Input = store.TrimJSON(call.Input, limit)
 	if s != nil && call.SessionID != "" {
 		if err := c.sessions.Revive(ctx, *s); err != nil {
 			c.log.Error("revive session", "session", s.ID, "err", err)
@@ -387,23 +392,24 @@ func (c *Core) logCall(ctx context.Context, call model.Call, s *model.Session) i
 }
 
 // Broadcast limits: call.logged tells the app that something happened (for
-// the character and live views); the full row stays in the log.
+// the character and live views); the row in the log has more.
+//
+// An approval card carries more than that: the user decides on what they
+// see. The app renders the first 256 KB and lets the user copy the rest, so
+// 1 MB (also the largest Q46 budget) covers it. The MCP body limit is 64 MB
+// (gateway.maxRequestBody, for Resend attachments) while an IPC line is
+// 32 MB (ipc.MaxLine), so an unbounded card would close the app's
+// connection and void every pending card with it.
 const (
-	broadcastInputLimit  = 8 << 10
-	broadcastResultLimit = 2 << 10
+	broadcastInputLimit    = 8 << 10
+	broadcastResultLimit   = 2 << 10
+	broadcastApprovalInput = 1 << 20
 )
 
 func trimForBroadcast(c model.Call) model.Call {
-	if len(c.Input) > broadcastInputLimit {
-		c.Input = mustJSON(fmt.Sprintf("(입력 %d bytes, 로그 검색에서 전체 보기)", len(c.Input)))
-	}
+	c.Input = store.TrimJSON(c.Input, broadcastInputLimit)
 	c.ResultText = store.TruncateUTF8(c.ResultText, broadcastResultLimit)
 	return c
-}
-
-func mustJSON(v any) json.RawMessage {
-	b, _ := json.Marshal(v)
-	return b
 }
 
 func joinReasons(r []string) string { return strings.Join(r, ",") }

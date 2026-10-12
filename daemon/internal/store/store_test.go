@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/farero-dev/farero/daemon/internal/model"
 )
@@ -286,5 +288,76 @@ func TestMigrateFromV1(t *testing.T) {
 	}
 	if got, _ := s.TaintTombstones(context.Background()); !got[x.ID] {
 		t.Fatalf("tombstones: %v", got)
+	}
+}
+
+func TestTrimJSON(t *testing.T) {
+	small := json.RawMessage(`{"a":"x"}`)
+	if got := TrimJSON(small, 100); string(got) != string(small) {
+		t.Fatalf("small input changed: %s", got)
+	}
+	big := strings.Repeat("가", 5000) // 15000 bytes
+	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a.txt", "content": big, "n": 7, "list": []any{"short", big}})
+	got := TrimJSON(raw, 4000)
+	if len(got) > 4000 {
+		t.Fatalf("not bounded: %d", len(got))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(got, &m); err != nil {
+		t.Fatalf("not JSON: %v: %s", err, got)
+	}
+	if m["file_path"] != "/tmp/a.txt" || m["n"] != float64(7) {
+		t.Fatalf("short fields changed: %v", m)
+	}
+	content, _ := m["content"].(string)
+	if !utf8.ValidString(content) || !strings.HasPrefix(content, "가가") || !strings.Contains(content, "bytes]") {
+		t.Fatalf("content not cut on a rune boundary with a marker: %q", content[:40])
+	}
+	if l, _ := m["list"].([]any); len(l) != 2 || l[0] != "short" {
+		t.Fatalf("list changed: %v", m["list"])
+	}
+	// Not JSON, or not shrinkable: a placeholder string.
+	for _, in := range []json.RawMessage{json.RawMessage(strings.Repeat("x", 200)), json.RawMessage("[" + strings.Repeat("1,", 200) + "1]")} {
+		var s string
+		if err := json.Unmarshal(TrimJSON(in, 100), &s); err != nil || !strings.Contains(s, "bytes") {
+			t.Fatalf("placeholder: %v %q", err, s)
+		}
+	}
+}
+
+// A huge input (a 40 MB attachment, a Write of a whole file) must not hold
+// the write lock for seconds while the trigram index eats it.
+func TestInsertCallBoundsInput(t *testing.T) {
+	s := newMem(t)
+	raw, _ := json.Marshal(map[string]any{"to": "a@b.c", "attachment": strings.Repeat("Zm9v", 1<<20)}) // 4 MB
+	start := time.Now()
+	addCall(t, s, "", "send_email", string(raw), "ok")
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("insert took %v", d)
+	}
+	calls, err := s.QueryCalls(context.Background(), CallFilter{Limit: 1})
+	if err != nil || len(calls) != 1 {
+		t.Fatal(err, calls)
+	}
+	if len(calls[0].Input) > MaxStoredInput {
+		t.Fatalf("stored input %d bytes", len(calls[0].Input))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(calls[0].Input, &m); err != nil || m["to"] != "a@b.c" {
+		t.Fatalf("stored input: %v %v", err, m)
+	}
+	// Still searchable by its short fields.
+	if hits, _ := s.QueryCalls(context.Background(), CallFilter{Query: "a@b.c"}); len(hits) != 1 {
+		t.Fatalf("search: %d hits", len(hits))
+	}
+}
+
+// The budget is used, not just respected: a 20 KB string under a 16 KB
+// limit keeps close to 16 KB.
+func TestTrimJSONFillsBudget(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a", "content": strings.Repeat("x", 20000)})
+	got := TrimJSON(raw, DefaultResultLimit)
+	if len(got) > DefaultResultLimit || len(got) < DefaultResultLimit-50 {
+		t.Fatalf("got %d bytes, limit %d", len(got), DefaultResultLimit)
 	}
 }

@@ -65,7 +65,7 @@ MCP requests carry no session id, and the `headersHelper` environment does not i
 
 ### Storage (`internal/store`)
 
-SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows; a tainted one leaves a `deleted_taint` tombstone so the session comes back tainted if its agent is still running or resumed (Q39). Call results are truncated to the `log.result_limit` setting, 16KB by default, 1KB–1MB (Q46).
+SQLite through `modernc.org/sqlite` (no cgo). Migrations are numbered strings with `PRAGMA user_version`, and the DB file is backed up before a migration runs. `calls_fts` is an FTS5 trigram index. Queries of 2 characters or fewer fall back to `LIKE`, because Korean words are often 2 syllables (Q64). Deleting a session cascades to its hook events, calls and FTS rows; a tainted one leaves a `deleted_taint` tombstone so the session comes back tainted if its agent is still running or resumed (Q39). Call results are truncated to the `log.result_limit` setting, 16KB by default, 1KB–1MB (Q46). Stored inputs get the same budget through `store.TrimJSON` (long string values cut, still valid JSON), and `InsertCall` caps them at 1MB because the trigram trigger indexes `input_json` while holding the write lock. Approval cards carry at most 1MB of input: the gateway accepts 64MB bodies (Resend attachments) but an IPC line is 32MB. Policy, grants and the upstream call always use the full input.
 
 ## Facts verified in M0 and M2–M5 that constrain the code
 

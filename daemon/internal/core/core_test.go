@@ -733,12 +733,74 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/a", "content": big}, 1)
 	u.answer(u.approval().ID, model.AnswerDeny)
 	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
-	if len(c.Input) > 200 || !strings.Contains(string(c.Input), "bytes") {
-		t.Fatalf("broadcast input not trimmed: %d bytes", len(c.Input))
+	if len(c.Input) > broadcastInputLimit || !strings.Contains(string(c.Input), `"file_path":"/tmp/a"`) {
+		t.Fatalf("broadcast input not trimmed to a bounded JSON object: %d bytes", len(c.Input))
+	}
+	// The row keeps as much as the Q46 budget allows (16 KB by default).
+	stored := h.lastCall()
+	if len(stored.Input) > store.DefaultResultLimit || len(stored.Input) < store.DefaultResultLimit-100 {
+		t.Fatalf("stored input %d bytes, want close to %d", len(stored.Input), store.DefaultResultLimit)
+	}
+	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/a")
+}
+
+// inputObject decodes a bounded input and checks it is still a JSON object
+// no larger than limit that kept its short field.
+func inputObject(t *testing.T, raw json.RawMessage, limit int, key, want string) map[string]any {
+	t.Helper()
+	if len(raw) > limit {
+		t.Fatalf("input %d bytes, limit %d", len(raw), limit)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil || m[key] != want {
+		t.Fatalf("input not a JSON object with %s=%q: %v %.80s", key, want, err, raw)
+	}
+	return m
+}
+
+// A Write of a multi-MB file: the card and the log row stay bounded, while
+// the whole content is what policy and the agent see.
+func TestApprovalCardBoundsAgentInput(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	big := strings.Repeat("나", 1<<20) // 3 MB
+	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/big", "content": big}, 1)
+	ap := u.approval()
+	m := inputObject(t, ap.Input, broadcastApprovalInput, "file_path", "/tmp/big")
+	if c, _ := m["content"].(string); !strings.HasPrefix(c, "나나") || !strings.Contains(c, "bytes]") {
+		t.Fatalf("content not cut with a marker: %.40q", c)
+	}
+	// A UI that connects while the card is open gets the bounded copy too.
+	u2 := h.ui()
+	if len(u2.snap.Approvals) != 1 {
+		t.Fatalf("snapshot: %+v", u2.snap.Approvals)
+	}
+	inputObject(t, u2.snap.Approvals[0].Input, broadcastApprovalInput, "file_path", "/tmp/big")
+	u.answer(ap.ID, model.AnswerDeny)
+	stored := h.lastCall()
+	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/big")
+	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
+	inputObject(t, c.Input, broadcastInputLimit, "file_path", "/tmp/big")
+}
+
+// A plugin call with a multi-MB argument (a Resend attachment) reaches the
+// upstream unchanged; only the card and the row are bounded.
+func TestUpstreamGetsFullPluginInput(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	a := h.agent("s1", 100)
+	big := strings.Repeat("Zm9v", 1<<20) // 4 MB
+	ch := a.callAsync("dev_write_sim", map[string]any{"text": big, "to": "a@b.c"})
+	ap := u.approval()
+	inputObject(t, ap.Input, broadcastApprovalInput, "to", "a@b.c")
+	u.answer(ap.ID, model.AnswerAllow)
+	if res := <-ch; res.IsError || text(res) != "wrote: "+big {
+		t.Fatalf("upstream did not get the full input: err=%v len=%d", res.IsError, len(text(res)))
 	}
 	stored := h.lastCall()
-	if len(stored.Input) < 20000 {
-		t.Fatalf("stored input was trimmed: %d", len(stored.Input))
+	inputObject(t, stored.Input, store.DefaultResultLimit, "to", "a@b.c")
+	if stored.Decision != model.DecisionUserAllowed {
+		t.Fatalf("log: %+v", stored)
 	}
 }
 
