@@ -54,6 +54,8 @@ public struct AppState: Sendable, Equatable {
     public var lastAllowedAt: Date?
     public var lastDeniedAt: Date?
     public var lastErrorAt: Date?
+    /// The last gateway call farerod could not tie to a session (5-2).
+    public var lastUnknownSessionAt: Date?
     /// When each new session appeared (greeting).
     public var sessionAppearedAt: [String: Date] = [:]
 
@@ -65,6 +67,9 @@ public struct AppState: Sendable, Equatable {
     public var activeSessions: [Session] {
         sessions.values.filter { $0.status.isActive }.sorted(by: AppState.newestFirst)
     }
+
+    /// Sessions in the middle of a turn: the number in the 여럿 작업 중 badge.
+    public var runningSessionCount: Int { sessions.values.filter { $0.status == .running }.count }
 
     /// The card the shortcuts act on (the oldest).
     public var frontApproval: Approval? { approvals.first }
@@ -146,6 +151,7 @@ public struct AppState: Sendable, Equatable {
         case .callLogged(let call):
             if CallDecision.showsDenied.contains(call.decision) { lastDeniedAt = now }
             if !call.error.isEmpty { lastErrorAt = now }
+            if call.isUnknownSession { lastUnknownSessionAt = now }
         case .pluginUpdated(let p):
             if let i = plugins.firstIndex(where: { $0.plugin == p.plugin }) {
                 plugins[i] = p

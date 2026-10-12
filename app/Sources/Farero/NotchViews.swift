@@ -129,7 +129,8 @@ struct CompactContent: View {
     var body: some View {
         let sessions = model.state.activeSessions
         HStack(spacing: 0) {
-            CharacterView(state: model.character, size: NotchStyle.compactCharacter)
+            CharacterView(state: model.character, size: NotchStyle.compactCharacter,
+                          sessionCount: model.state.runningSessionCount)
                 .frame(width: NotchStyle.wing)
             Color.clear.frame(width: metrics.hasNotch ? metrics.notchSize.width : 0)
             HStack(spacing: 3) {
@@ -166,7 +167,7 @@ struct ExpandedContent: View {
                 .contentShape(Rectangle())
                 .onTapGesture { model.togglePinned() }
             HStack(spacing: 12) {
-                CharacterView(state: model.character, size: 48)
+                CharacterView(state: model.character, size: 48, sessionCount: state.runningSessionCount)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.character.lighthouse.label)
                         .font(.system(size: 15, weight: .semibold))

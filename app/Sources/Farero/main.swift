@@ -28,6 +28,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windows.openDebugWindows()
     }
 
+    /// The notch and its cards never take focus (기능 명세서 5-3); only the
+    /// menu's windows activate the app. scripts/e2e-notch.py reads this line.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        model.debugLog("app became active")
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         model.stop()
     }

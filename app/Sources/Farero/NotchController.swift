@@ -14,15 +14,25 @@ final class NotchController {
     private let model: AppModel
     private let panel: NotchPanel
     private var islandFrameInView: CGRect = .zero
-    private var monitors: [Any] = []
+    /// Hover tracking. It runs only while the island is visible: with the
+    /// island hidden nothing can be hovered, and farero keeps no timer or
+    /// event monitor alive then (기능 명세서 F-12, Q80: 0% CPU while hidden).
+    private var pointerMonitors: [Any] = []
     private var pollTimer: Timer?
+    /// Closes a pinned island on a click elsewhere; installed only while pinned.
+    private var outsideClickMonitor: Any?
+    /// Takes the panel off screen once the hide animation has played.
+    private var orderOutWork: DispatchWorkItem?
     private var screenObserver: NSObjectProtocol?
+    private var loggedMode: NotchMode?
+    private var loggedIsland: CGRect?
 
     init(model: AppModel) {
         self.model = model
         panel = NotchPanel(contentRect: CGRect(origin: .zero, size: NotchMetrics.default.panelSize))
         let root = NotchRootView(model: model) { [weak self] frame in
             self?.islandFrameInView = frame
+            self?.logIsland(frame)
             self?.updatePointer()
         }
         let host = FirstMouseHostingView(rootView: root)
@@ -33,34 +43,97 @@ final class NotchController {
 
     func start() {
         layout()
-        panel.orderFrontRegardless()
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.layout() }
         }
+        model.onChange.append { [weak self] in self?.stateChanged() }
+        stateChanged()
+    }
+
+    private func stateChanged() {
+        if model.mode != loggedMode {
+            loggedMode = model.mode
+            model.debugLog("notch \(model.mode)")
+        }
+        if model.mode == .hidden {
+            stopPointerTracking()
+            scheduleOrderOut()
+        } else {
+            orderOutWork?.cancel()
+            orderOutWork = nil
+            if !panel.isVisible {
+                panel.orderFrontRegardless()
+                model.debugLog("panel ordered front")
+            }
+            startPointerTracking()
+        }
+        setOutsideClickMonitor(model.pinned)
+        updatePointer()
+    }
+
+    /// FARERO_DEBUG=1: the island's laid-out frame in screen coordinates
+    /// (top-left origin, as `screencapture -R` takes it), for scripts/e2e-notch.py.
+    private func logIsland(_ frame: CGRect) {
+        let f = CGRect(x: (panel.frame.minX + frame.minX).rounded(),
+                       y: ((NSScreen.screens.first?.frame.maxY ?? 0) - panel.frame.maxY + frame.minY).rounded(),
+                       width: frame.width.rounded(), height: frame.height.rounded())
+        guard f != loggedIsland else { return }
+        loggedIsland = f
+        model.debugLog("island \(Int(f.minX)),\(Int(f.minY)) \(Int(f.width))x\(Int(f.height))")
+    }
+
+    private func startPointerTracking() {
+        guard pointerMonitors.isEmpty else { return }
         // Mouse-moved monitors need no permission (only key monitors do).
         if let m = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { [weak self] _ in
             MainActor.assumeIsolated { self?.updatePointer() }
-        }) { monitors.append(m) }
+        }) { pointerMonitors.append(m) }
         if let m = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: { [weak self] event in
             MainActor.assumeIsolated { self?.updatePointer() }
             return event
-        }) { monitors.append(m) }
-        // A click anywhere else closes a pinned island.
-        if let m = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown], handler: { [weak self] _ in
-            MainActor.assumeIsolated { self?.model.unpin() }
-        }) { monitors.append(m) }
+        }) { pointerMonitors.append(m) }
         // Safety net for pointer exits no event reports (e.g. Mission Control).
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.updatePointer() }
         }
-        model.onChange.append { [weak self] in self?.stateChanged() }
     }
 
-    private func stateChanged() {
-        if model.mode != .hidden, !panel.isVisible { panel.orderFrontRegardless() }
-        updatePointer()
+    private func stopPointerTracking() {
+        for m in pointerMonitors { NSEvent.removeMonitor(m) }
+        pointerMonitors = []
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    private func setOutsideClickMonitor(_ on: Bool) {
+        if on, outsideClickMonitor == nil {
+            outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+                MainActor.assumeIsolated { self?.model.unpin() }
+            }
+        } else if !on, let m = outsideClickMonitor {
+            NSEvent.removeMonitor(m)
+            outsideClickMonitor = nil
+        }
+    }
+
+    /// Orders the panel out after the island has faded or slid away, so a
+    /// hidden notch leaves no window on screen either.
+    private func scheduleOrderOut() {
+        guard panel.isVisible, orderOutWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.orderOutWork = nil
+                if self.model.mode == .hidden {
+                    self.panel.orderOut(nil)
+                    self.model.debugLog("panel ordered out")
+                }
+            }
+        }
+        orderOutWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     /// The screen to use: the built-in notched screen if there is one,
