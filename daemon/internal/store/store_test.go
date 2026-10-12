@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -180,6 +179,10 @@ func TestMigrationBackupAndReopen(t *testing.T) {
 	if _, err := s2.Session(context.Background(), "claude:persist"); err != nil {
 		t.Fatalf("session lost across reopen: %v", err)
 	}
+	// A new database and an up-to-date one have nothing to back up.
+	if baks, _ := filepath.Glob(path + ".bak-*"); len(baks) != 0 {
+		t.Fatalf("unexpected backups: %v", baks)
+	}
 }
 
 func TestPolicyOverridesAndPlugins(t *testing.T) {
@@ -215,6 +218,39 @@ func TestCallFilterAcceptsEmptyDates(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"from":"2026-10-02T09:00:00+09:00"}`), &f); err != nil || f.From.IsZero() {
 		t.Fatalf("%+v %v", f, err)
+	}
+	var g CallFilter
+	if err := json.Unmarshal([]byte(`{"from":"2026-10-01T00:00:00Z","to":"2026-10-02T00:00:00Z"}`), &g); err != nil ||
+		!g.From.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) || !g.To.Equal(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("both dates: %+v %v", g, err)
+	}
+	for _, bad := range []string{`{"from":"yesterday"}`, `{"from":"2026-10-01T00:00:00Z","to":"tomorrow"}`} {
+		if err := json.Unmarshal([]byte(bad), &g); err == nil {
+			t.Errorf("%s: no error", bad)
+		}
+	}
+}
+
+// InsertCall returns the new row's id, and the timestamp comes back as
+// stored (to the millisecond).
+func TestInsertCallIDAndTime(t *testing.T) {
+	s := newMem(t)
+	ctx := context.Background()
+	ts := time.UnixMilli(1_791_000_000_123)
+	var ids []int64
+	for _, tool := range []string{"a", "b"} {
+		id, err := s.InsertCall(ctx, model.Call{TS: ts, Kind: model.KindPlugin, Tool: tool, Input: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if ids[0] <= 0 || ids[1] != ids[0]+1 {
+		t.Fatalf("ids: %v", ids)
+	}
+	calls, err := s.QueryCalls(ctx, CallFilter{Tool: "b"})
+	if err != nil || len(calls) != 1 || calls[0].ID != ids[1] || !calls[0].TS.Equal(ts) {
+		t.Fatalf("row: %v %+v", err, calls)
 	}
 }
 
@@ -292,8 +328,16 @@ func TestMigrateFromV1(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := os.Stat(path + ".bak-v1"); err != nil {
-		t.Fatalf("no backup: %v", err)
+	// The backup is the v1 database, not just a file of that name. (Not
+	// byte for byte: opening in WAL mode rewrites the header first.)
+	bak, err := sql.Open("sqlite", "file:"+path+".bak-v1?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bak.Close()
+	var v int
+	if err := bak.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 1 {
+		t.Fatalf("backup: version %d, %v", v, err)
 	}
 	x := addSession(t, s, "old")
 	x.Tainted = true
