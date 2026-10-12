@@ -463,3 +463,43 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
   - 포커스: 카드가 뜨고 닫히는 동안 맨 앞 앱이 바뀌지 않았고, Farero는 한 번도 활성화되지 않았다.
 - 확인하지 못한 것: 실제 키 입력과 클릭. 이 맥의 Claude Code 프로세스에는 손쉬운 사용 권한이 없어(`CGPreflightPostEventAccess` false) 입력 이벤트를 만들 수 없다. `E2E_MANUAL=1`로 사람이 ⌃⌥Y/S/N을 누르고 허용 버튼을 클릭하는 확인이 남아 있다. 스크립트는 그 답이 단축키로 왔는지 클릭으로 왔는지까지 본다.
 - 실행 중 사람이 맥을 쓰면 판정을 바꾼다: 포인터가 섬 위에 있으면 hover로 펼쳐진 것으로 보고, 바깥 클릭으로 닫히면 기록만 남긴다. 맨 앞 앱이 바뀌는 것도 실패로 보지 않는다(Farero가 앞에 오거나 활성화되면 실패).
+
+### M7 마무리 기능
+- 시작 상태: 로그 검색(FTS5 trigram + 2글자 이하 LIKE, 필터), 설정 창(도구별 단계, 결과 저장 한도), 세션 삭제, 터미널 점프 코드, Info.plist의 `NSAppleEventsUsageDescription`은 앱 1·2단계에서 이미 있었다. 빈틈을 메우고 실제 Terminal.app과 앱 번들로 확인했다.
+- 브랜치 `seongj-un/m7`은 M6까지 병합된 develop(3d9456d) 위에서 시작했다.
+
+**터미널 점프 (F-11, 시나리오 E)**
+- 자동화 권한은 메인 스레드 밖에서 `AEDeterminePermissionToAutomateTarget`(사용자에게 묻기 포함)로 먼저 확인한다. 확인 창이 떠 있는 동안 노치가 멈추지 않는다. 그다음 AppleScript를 메인 스레드에서 `with timeout of 3 seconds`로 돌린다(멈춘 Terminal이 UI를 2분 동안 잡지 않게).
+- 스크립트: `get every window`로 `window id N` 참조를 받고, 창마다 `tty of every tab`을 한 번에 읽는다. 찾으면 Terminal을 먼저 `activate`하고, 최소화를 풀고, `set index of w to 1`, 탭을 선택한다. Terminal이 비활성일 때는 `set index`가 무시돼서(macOS 26.6.2, Terminal 2.15) activate를 맨 앞에 두었다.
+- tty 검증과 스크립트 생성, 결과 해석은 `FareroCore.TerminalJump`로 옮겨 테스트했다(`tty` + ASCII 영숫자만 통과, 생성한 스크립트가 Terminal 사전으로 컴파일되는지도 확인).
+- 노치 세션 행을 누르면 점프한다(시나리오 E "세션을 누름"). 터미널 버튼·삭제 버튼·컨텍스트 메뉴는 그대로다. 로그 창 세션 목록에도 "터미널로 이동"을 넣었다.
+- 앱이 "Terminal이 실행 중인지"를 `NSRunningApplication`으로 먼저 보던 검사를 뺐다. e2e에서 Terminal 창이 열려 있는데도 이 검사가 실행 중이 아니라고 판단해 바로 "찾을 수 없음"이 된 경우가 있었다(검증 함수는 통과하는 tty였고, 다른 조기 반환 경로가 없었다). 권한 확인(-600)과 스크립트 첫 줄(`is not running`)이 같은 일을 한다.
+- 개발용 제어 파이프에 `jump <session-id>`(행을 눌렀을 때와 같은 코드), `logsearch <text>`(로그 창과 같은 검색 코드)를 더했고, 디버그 로그에 `toast`, `terminal permission/script` 줄을 남긴다.
+
+**정책·설정·세션 삭제 (데몬)**
+- 저장된 사용자 단계가 분류표 갱신 뒤 `no_session` 도구의 `auto`가 되면 적용하지 않는다(Q33). 값은 지우지 않고 시작할 때 경고 로그를 남긴다. 사용자 단계가 새 기본값과 같아져도 `overridden: true`로 보여 준다(6-5: 사용자가 고른 값은 유지).
+- `settings.set`은 보낸 필드만 바꾼다(이전에는 한도만 보내면 업데이트 확인이 꺼졌다). 결과 저장 한도는 1KB~1MB, 벗어나면 `error`.
+- `log.query`의 `limit`이 1000을 넘으면 200이 되던 것을 문서대로 1000으로 맞췄다.
+- 실행 중인 세션을 지우면 다음 훅 이벤트가 같은 id로 세션을 다시 만드는데, 이때 오염 표시가 사라졌다. 오염된 세션을 지우면 `deleted_taint`(마이그레이션 v2)에 id를 남겨, 다시 만들어지는 세션이 오염 상태로 시작한다(Q39, `claude --resume`도 같은 id).
+- 카드가 열린 채로 세션을 지운 뒤 카드에 답하면 감사 로그 행이 FK 오류로 버려졌다. 로그를 쓰기 전에 세션을 다시 만든다.
+- `farero-devctl settings [limit <bytes>|update on|off]`, `session delete <id>`를 더했다.
+
+**실제 확인 (`scripts/e2e-m7.py`)**
+- 진행: 개발 farerod(가짜 `dev` 플러그인, `/tmp/frm7`)와 격리된 Claude 설정, 배포용 번들(`scripts/build.sh`)을 개발 모드로 띄운다. alpha·beta는 스크립트가 새로 연 Terminal.app 창에서 실행한 실제 claude, gamma는 스크립트의 pty에서 실행한 claude다. 스크립트가 연 창만 끝날 때 닫는다.
+- 점프마다 원래 맨 앞 앱을 다시 앞으로 가져와 Terminal이 뒤에 있는 상태에서 시작한다.
+- 결과: 여섯 번째 실행에서 검사 98개가 모두 통과했다(Claude Code 2.1.296, macOS 26.6.2, Terminal 2.15). 다섯 번째도 98개 통과.
+
+| 회차 | 결과 | 원인과 조치 |
+|---|---|---|
+| 1 | 세션 시작 실패 | 스크립트 버그: Terminal 창 명령이 `env … exec claude`라서 `env`가 `exec`라는 프로그램을 찾았다 → `exec env … claude`. Terminal.app 자체가 Claude Code 세션의 환경 변수(`CLAUDE_CODE_CHILD_SESSION`: 기록 저장 꺼짐)를 갖고 있어 `CLAUDE*`를 지운다 |
+| 2 | alpha 점프 notFound(5.3초), Bash 카드 없음 | 맨 앞 앱이 Orca(Terminal은 뒤)였다. 점프 원인 로그가 없어 디버그 로그를 더했다. `echo 배포 완료`는 Claude Code가 묻지 않고 실행하는 명령이라 `>> deploy.log`로 바꿨다 |
+| 3 | 카드 판정 2개 실패 | 공용 `wait_card`가 입력을 `ensure_ascii=True`로 직렬화해 한국어 명령을 찾지 못했다 → `ensure_ascii=False`. 이 회차는 Terminal이 맨 앞이었다 |
+| 4 | 97 통과, 1 실패 | 점프 전에 원래 앱을 앞으로 가져오게 바꿨다(Terminal이 뒤에 있는 경우). 실패 1개는 watch 로그 시각이 밀리초로 잘려 삭제 알림이 기준 시각보다 앞선 것으로 계산된 판정 문제 |
+| 5 | 98 통과 | 다만 gamma 점프의 앱 로그에 권한 확인 줄이 없었다: `NSRunningApplication` 검사가 Terminal이 실행 중이 아니라고 판단해 바로 돌아갔다 → 검사를 뺐다 |
+| 6 | 98 통과 | gamma 점프도 권한 확인 → 스크립트 `notfound`로 끝났다. 점프: alpha 0.41초, beta 0.36초(앱 안 권한 확인 0.00~0.01초, 스크립트 0.12~0.13초). 4KB 한도에서 6000바이트 결과가 4095바이트로 저장(UTF-8 경계) |
+
+- 확인한 것: 시나리오 E(다른 앱이 맨 앞이고 Terminal 안에서도 다른 창이 앞에 있을 때 alpha → 그 창이 맨 앞, 선택된 탭의 tty가 alpha의 것, Terminal이 맨 앞 앱, Farero는 비활성; beta도 같음), Terminal 밖 세션은 "터미널 창을 찾을 수 없음", 한국어 1·2글자(LIKE)와 3글자 이상(trigram) 검색을 데몬과 앱의 검색 코드로, 필터 14가지, 도구 단계 변경과 재시작 뒤 유지·기본값 복귀·매번 승인 도구 거부, 결과 한도와 범위 밖 거부·부분 변경, 세션 삭제 뒤 훅 이벤트·로그·검색 결과 없음, 실행 중이던 오염 세션이 다시 나타날 때 오염 유지, 앱이 한 번도 활성화되지 않음.
+- 확인하지 못한 것:
+  - 최소화된 창 복원: 이 맥의 Terminal은 AppleScript `set miniaturized ... to true`를 무시해(값도 계속 false) 창을 최소화할 수 없었다. 스크립트는 항상 `set miniaturized of w to false`를 보낸다.
+  - 사람이 실제로 노치 행을 클릭하는 확인. 입력 이벤트를 만들 손쉬운 사용 권한이 없어 제어 파이프 `jump`로 같은 코드를 지나게 했다.
+  - Farero 자신의 자동화 권한 확인 창: 스크립트가 앱을 직접 실행하면 확인 창 없이 권한 확인이 바로 0을 돌려준다. Apple Event가 스크립트를 띄운 앱(Orca)의 것으로 처리되는 것으로 보인다(추정). `E2E_MANUAL=1`은 `open`으로 앱을 띄워 사람이 확인 창에 답하고, 노치의 세션 행을 직접 클릭하고, 카드 단축키를 누르게 한다(아직 실행하지 않음).
