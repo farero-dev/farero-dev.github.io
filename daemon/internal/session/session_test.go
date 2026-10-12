@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -374,5 +375,146 @@ func TestReviveAfterDelete(t *testing.T) {
 	m.Revive(ctx, snap)
 	if s, _ := m.Get("claude:s2"); !s.Tainted {
 		t.Fatalf("taint from snapshot lost: %+v", s)
+	}
+}
+
+// Sweep's limits are exact: a dead agent is unknown ExitGrace after it was
+// first seen dead, a session without a PID UnknownAfter after its last
+// event, and a session without a PID never goes through alive().
+func TestSweepBoundaries(t *testing.T) {
+	ctx := context.Background()
+	t.Run("exit grace", func(t *testing.T) {
+		m, _, _ := newManager(t)
+		clock := time.Now()
+		m.now = func() time.Time { return clock }
+		m.Apply(ctx, model.AgentClaude, HookInput{SessionID: "d", HookEventName: EventStop}, "", 100)
+		dead := func(int, time.Time) bool { return false }
+		m.Sweep(ctx, dead) // first seen dead
+		clock = clock.Add(ExitGrace - time.Millisecond)
+		if got := m.Sweep(ctx, dead); len(got) != 0 {
+			t.Fatalf("before the grace: %v", got)
+		}
+		clock = clock.Add(time.Millisecond)
+		if got := m.Sweep(ctx, dead); len(got) != 1 || got[0] != 100 {
+			t.Fatalf("at the grace: %v", got)
+		}
+	})
+	t.Run("silence", func(t *testing.T) {
+		m, _, _ := newManager(t)
+		clock := time.Now()
+		m.now = func() time.Time { return clock }
+		m.Apply(ctx, model.AgentClaude, HookInput{SessionID: "q", HookEventName: EventStop}, "", 0)
+		alive := func(pid int, _ time.Time) bool {
+			t.Errorf("alive(%d) for a session without a PID", pid)
+			return false
+		}
+		clock = clock.Add(ExitGrace + time.Second)
+		m.Sweep(ctx, alive)
+		clock = clock.Add(UnknownAfter - ExitGrace - time.Second - time.Millisecond)
+		m.Sweep(ctx, alive)
+		if s, _ := m.Get("claude:q"); s.Status != model.StatusWaitingInput {
+			t.Fatalf("before UnknownAfter: %s", s.Status)
+		}
+		clock = clock.Add(time.Millisecond)
+		m.Sweep(ctx, alive)
+		if s, _ := m.Get("claude:q"); s.Status != model.StatusUnknown {
+			t.Fatalf("at UnknownAfter: %s", s.Status)
+		}
+	})
+}
+
+// One Sweep handles every session, whatever comes before it in the map:
+// ended, alive, newly dead and recently heard sessions are skipped, and
+// both a dead agent and a silent session still become unknown.
+func TestSweepVisitsEverySession(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	clock := time.Now()
+	m.now = func() time.Time { return clock }
+	apply := func(id, event string, pid int) {
+		m.Apply(ctx, model.AgentClaude, HookInput{SessionID: id, HookEventName: event}, "", pid)
+	}
+	alive := map[int]bool{}
+	for i := 0; i < 10; i++ {
+		apply(fmt.Sprintf("ended%d", i), EventSessionEnd, 1000+i)
+		apply(fmt.Sprintf("alive%d", i), EventStop, 2000+i)
+		alive[2000+i] = true
+	}
+	apply("dead", EventStop, 100)
+	apply("silent", EventStop, 0)
+	isAlive := func(pid int, _ time.Time) bool { return alive[pid] }
+	m.Sweep(ctx, isAlive) // "dead" is first seen dead
+	clock = clock.Add(UnknownAfter)
+	for i := 0; i < 10; i++ {
+		apply(fmt.Sprintf("new%d", i), EventStop, 3000+i) // dead, first seen now
+		apply(fmt.Sprintf("heard%d", i), EventStop, 0)    // no PID, just heard from
+	}
+	got := m.Sweep(ctx, isAlive)
+	if len(got) != 1 || got[0] != 100 {
+		t.Fatalf("dead PIDs: %v", got)
+	}
+	for _, id := range []string{"dead", "silent"} {
+		if s, _ := m.Get("claude:" + id); s.Status != model.StatusUnknown {
+			t.Errorf("%s: %s", id, s.Status)
+		}
+	}
+	for _, id := range []string{"alive3", "new3", "heard3"} {
+		if s, _ := m.Get("claude:" + id); s.Status != model.StatusWaitingInput {
+			t.Errorf("%s: %s", id, s.Status)
+		}
+	}
+}
+
+// Opening and closing cards publishes only when the shown status changes:
+// the first card and the last one closing, not the ones in between.
+func TestApprovalCountPublishesOnChange(t *testing.T) {
+	m, _, updates := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventStop, ""), "", 0)
+	want := []string{model.StatusWaitingApproval, "", "", model.StatusWaitingInput}
+	steps := []func(context.Context, string){m.ApprovalOpened, m.ApprovalOpened, m.ApprovalClosed, m.ApprovalClosed}
+	for i, step := range steps {
+		n := len(*updates)
+		step(ctx, "claude:s1")
+		switch {
+		case want[i] == "" && len(*updates) != n:
+			t.Fatalf("step %d: unexpected update %+v", i, (*updates)[n:])
+		case want[i] != "" && (len(*updates) != n+1 || (*updates)[n].Status != want[i]):
+			t.Fatalf("step %d: updates %+v, want one with %s", i, (*updates)[n:], want[i])
+		}
+	}
+}
+
+// SetStatus changes the status and tells the app once; setting the same
+// status again does nothing.
+func TestSetStatusChangesOnce(t *testing.T) {
+	m, _, updates := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventPermissionRequest, "Bash"), "", 0)
+	n := len(*updates)
+	m.SetStatus(ctx, "claude:s1", model.StatusRunning)
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusRunning || len(*updates) != n+1 {
+		t.Fatalf("status %s, %d updates", s.Status, len(*updates)-n)
+	}
+	m.SetStatus(ctx, "claude:s1", model.StatusRunning)
+	if len(*updates) != n+1 {
+		t.Fatalf("repeated: %d updates", len(*updates)-n)
+	}
+}
+
+// A taint that is only in memory so far still leaves a tombstone when the
+// session is deleted (Q39).
+func TestDeleteUsesTaintInMemory(t *testing.T) {
+	m, st, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventUserPromptSubmit, ""), "", 0)
+	m.mu.Lock()
+	m.sessions["claude:s1"].Tainted = true // not published yet
+	m.mu.Unlock()
+	if err := m.Delete(ctx, "claude:s1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := st.TaintTombstones(ctx); !got["claude:s1"] {
+		t.Fatalf("tombstones: %v", got)
 	}
 }
