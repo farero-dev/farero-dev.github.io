@@ -359,6 +359,95 @@ func TestApplyReportsCLIRewrite(t *testing.T) {
 	}
 }
 
+// editServer changes one field of farero's MCP entry in ~/.claude.json, as
+// an older farero (other port or hook path) or the user would have left it.
+func editServer(t *testing.T, path, field string, v any) {
+	t.Helper()
+	var doc map[string]any
+	b, _ := os.ReadFile(path)
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["mcpServers"].(map[string]any)[ServerName].(map[string]any)[field] = v
+	b, _ = json.Marshal(doc)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Any one field of the MCP entry that differs from what farero would
+// register (the gateway port, the headersHelper path, the timeout) makes
+// the registration stale; the hooks alone being right is not enough.
+func TestStatusFlagsEachStaleServerField(t *testing.T) {
+	c, _ := setup(t, userSettings)
+	ctx := context.Background()
+	for field, v := range map[string]any{
+		"url":           "http://127.0.0.1:1/mcp",
+		"headersHelper": "/old/farero-hook --headers --agent claude",
+		"timeout":       60000,
+	} {
+		if _, err := c.Apply(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if st := c.Status(ctx); !st.MCPInstalled || !st.HooksInstalled || st.StalePath {
+			t.Fatalf("fresh install: %+v", st)
+		}
+		editServer(t, c.UserJSON, field, v)
+		if st := c.Status(ctx); !st.MCPInstalled || !st.HooksInstalled || !st.StalePath {
+			t.Errorf("%s changed: %+v", field, st)
+		}
+	}
+}
+
+// Status reports the CLI it was given, not one found on this machine.
+func TestStatusUsesConfiguredCLI(t *testing.T) {
+	c, _ := setup(t, "")
+	if st := c.Status(context.Background()); !st.CLIFound || st.CLIPath != "/usr/local/bin/claude" || st.Version != "2.1.287" {
+		t.Fatalf("%+v", st)
+	}
+}
+
+// Apply says the CLI rewrote settings.json only when it did, and then says
+// "some are missing" unless both the hooks and the allow rule survived.
+func TestApplyRewriteMessage(t *testing.T) {
+	c, _ := setup(t, userSettings)
+	st, err := c.Apply(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(st.Message, "다시 썼습니다") {
+		t.Fatalf("no rewrite, but: %q", st.Message)
+	}
+	for name, edit := range map[string]func(map[string]any){
+		"allow dropped": func(v map[string]any) {
+			v["permissions"].(map[string]any)["allow"] = []any{"Bash(npm test:*)"}
+		},
+		"hooks dropped": func(v map[string]any) { delete(v, "hooks") },
+	} {
+		c, f := setup(t, userSettings)
+		inner := f.run
+		c.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			out, err := inner(ctx, name, args...)
+			if len(args) > 1 && args[1] == "add-json" {
+				b, _ := os.ReadFile(c.settingsPath())
+				var v map[string]any
+				json.Unmarshal(b, &v)
+				edit(v)
+				nb, _ := json.Marshal(v)
+				os.WriteFile(c.settingsPath(), nb, 0o644)
+			}
+			return out, err
+		}
+		st, err := c.Apply(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(st.Message, "다시 썼습니다") || !strings.Contains(st.Message, "일부 빠졌습니다") {
+			t.Errorf("%s: %q", name, st.Message)
+		}
+	}
+}
+
 // StopFailure ends a turn on an API error instead of Stop (v2.1.78); without
 // it the session would stay "running".
 func TestInstallRegistersStopFailure(t *testing.T) {
