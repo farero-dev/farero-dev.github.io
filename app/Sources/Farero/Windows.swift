@@ -35,7 +35,12 @@ final class WindowManager {
     private let model: AppModel
     private var windows: [Kind: NSWindow] = [:]
 
-    static let defaults = UserDefaults(suiteName: "dev.farero.Farero") ?? .standard
+    /// The app's own domain, shared with DaemonRegistrar. Earlier builds
+    /// named it as a suite ("dev.farero.Farero"), which Apple does not
+    /// support for the main bundle id; in the bundled app both name the
+    /// same ~/Library/Preferences/dev.farero.Farero.plist, so a flag an
+    /// older build wrote is still read.
+    static let defaults = UserDefaults.standard
 
     init(model: AppModel) {
         self.model = model
@@ -134,6 +139,10 @@ struct DaemonStatusView: View {
             LabeledContent("로그인 항목") { Text(model.registrationLabel) }
             if registrar.status.needsAttention {
                 Button("로그인 항목 설정 열기") { registrar.openLoginItemsSettings() }
+            }
+            if registrar.status == .translocated {
+                Banner(text: DaemonRegistrar.translocatedMessage, style: .warning)
+                Button("Finder에서 보기") { registrar.revealInFinder() }
             }
         }
         .formStyle(.grouped)

@@ -69,6 +69,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if case .failed = registrar.status {
             menu.addItem(action("로그인 항목에서 데몬 허용…", #selector(openLoginItems)))
         }
+        if registrar.status == .translocated {
+            let item = action(registrar.status.label, #selector(revealApp))
+            item.toolTip = DaemonRegistrar.translocatedMessage
+            item.image = Self.symbol("exclamationmark.triangle.fill", pointSize: 11, tint: .systemOrange)
+            menu.addItem(item)
+        }
         if let notice = model.versionNotice {
             menu.addItem(info(notice))
         }
@@ -133,5 +139,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         if let url = model.availableUpdate?.url { NSWorkspace.shared.open(url) }
     }
     @objc private func openLoginItems() { registrar.openLoginItemsSettings() }
+    @objc private func revealApp() { registrar.revealInFinder() }
     @objc private func quit() { NSApp.terminate(nil) }
 }
