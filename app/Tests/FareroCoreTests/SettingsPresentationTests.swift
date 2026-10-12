@@ -68,6 +68,22 @@ struct LogFilterTests {
         #expect(LogFilter.searchModeLabel("이슈 작성") == "전문 검색")
         #expect(LogFilter.searchModeLabel("npm") == "전문 검색")
     }
+
+    /// farerod counts runes (code points) after trimming white space, not
+    /// user-perceived characters (Q64).
+    @Test func searchModeCountsScalarsLikeFarerod() {
+        let decomposed = "배포".decomposedStringWithCanonicalMapping // 4 scalars, 2 characters
+        #expect(decomposed.unicodeScalars.count == 4)
+        #expect(LogFilter.searchModeLabel(decomposed) == "전문 검색")
+        #expect(LogFilter.searchModeLabel("배포".precomposedStringWithCanonicalMapping) == "부분 일치")
+        #expect(LogFilter.searchModeLabel("👍🏽") == "부분 일치") // thumbs up + skin tone: 2 scalars
+        #expect(LogFilter.searchModeLabel("👍🏽a") == "전문 검색")
+        #expect(LogFilter.searchModeLabel("👨‍👩‍👧") == "전문 검색") // one character, 5 scalars
+        #expect(LogFilter.searchModeLabel("e\u{301}x") == "전문 검색") // 2 characters, 3 scalars
+        // Go's strings.TrimSpace trims these too.
+        #expect(LogFilter.searchModeLabel("\u{3000}배포\u{00A0}\t\n") == "부분 일치")
+        #expect(LogFilter.searchModeLabel("\u{3000}\u{2028}") == nil)
+    }
 }
 
 @Suite("Call presentation")

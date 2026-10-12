@@ -33,7 +33,7 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>세션 목록에서 터미널 버튼을 누르면 그 세션이 실행 중인 Terminal 창과 탭을 앞으로 가져옵니다. 이를 위해 Terminal을 제어할 권한이 필요합니다.</string>
+	<string>노치에서 세션을 누르거나 '터미널로 이동'을 고르면 그 세션이 실행 중인 Terminal 창과 탭을 앞으로 가져옵니다. 이를 위해 Terminal을 제어할 권한이 필요합니다.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>MIT License</string>
 </dict>

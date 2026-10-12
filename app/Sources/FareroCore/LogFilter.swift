@@ -60,10 +60,15 @@ public struct LogFilter: Sendable, Equatable {
     /// How farerod will match the text (Q64): three or more characters use
     /// the trigram index, shorter ones (Korean words are often two
     /// syllables) a substring match.
+    ///
+    /// farerod counts code points (Go runes) after `strings.TrimSpace`, so
+    /// this counts Unicode scalars, not grapheme clusters: a decomposed
+    /// "배포" (U+1107 U+1162 U+1111 U+1169) is four, "👍🏽" two. Both trim
+    /// the same set (Unicode White_Space).
     public static func searchModeLabel(_ query: String) -> String? {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if q.isEmpty { return nil }
-        return q.count >= 3 ? "전문 검색" : "부분 일치"
+        return q.unicodeScalars.count >= 3 ? "전문 검색" : "부분 일치"
     }
 
     /// Decisions offered in the filter, in display order.

@@ -234,7 +234,7 @@ struct SessionRow: View {
         } else {
             summary
                 .contextMenu {
-                    Button("터미널로 이동") { model.jump(to: session) }.disabled(session.tty.isEmpty)
+                    Button("터미널로 이동") { jump() }.disabled(session.tty.isEmpty)
                     Divider()
                     Button("세션 삭제…", role: .destructive) { confirmingDelete = true }
                 }
@@ -280,7 +280,50 @@ struct SessionRow: View {
         }
     }
 
+    /// Scenario E: tapping a session goes to its terminal. The panel is
+    /// non-activating, so the tap leaves Farero inactive; only Terminal
+    /// comes forward.
+    private func jump() {
+        guard !session.tty.isEmpty else { return }
+        Task { await model.jump(to: session) }
+    }
+
     private var summary: some View {
+        HStack(spacing: 10) {
+            details
+                .contentShape(Rectangle())
+                .onTapGesture { jump() }
+                .help(session.tty.isEmpty ? "" : "눌러서 터미널로 이동 (\(session.tty))")
+            Button {
+                jump()
+            } label: {
+                Image(systemName: "terminal")
+                    .font(.system(size: 13))
+                    .frame(width: 30, height: 26)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+            .disabled(session.tty.isEmpty)
+            .help(session.tty.isEmpty ? "터미널 정보 없음" : "터미널로 이동 (\(session.tty))")
+            .accessibilityLabel("터미널로 이동")
+            Button {
+                confirmingDelete = true
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 12))
+                    .frame(width: 26, height: 26)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.06)))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("세션 삭제")
+            .accessibilityLabel("세션 삭제")
+        }
+    }
+
+    /// The status dot, name and status line: the part of the row a tap
+    /// sends to the terminal (the buttons beside it keep their own actions).
+    private var details: some View {
         let pending = model.state.pendingApprovalCount(sessionID: session.id)
         return HStack(spacing: 10) {
             Circle()
@@ -314,30 +357,6 @@ struct SessionRow: View {
                 .lineLimit(1)
             }
             Spacer(minLength: 0)
-            Button {
-                model.jump(to: session)
-            } label: {
-                Image(systemName: "terminal")
-                    .font(.system(size: 13))
-                    .frame(width: 30, height: 26)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.1)))
-            }
-            .buttonStyle(.plain)
-            .disabled(session.tty.isEmpty)
-            .help(session.tty.isEmpty ? "터미널 정보 없음" : "터미널로 이동 (\(session.tty))")
-            .accessibilityLabel("터미널로 이동")
-            Button {
-                confirmingDelete = true
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 12))
-                    .frame(width: 26, height: 26)
-                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.white.opacity(0.06)))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .help("세션 삭제")
-            .accessibilityLabel("세션 삭제")
         }
     }
 

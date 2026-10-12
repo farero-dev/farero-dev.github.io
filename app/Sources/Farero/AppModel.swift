@@ -58,6 +58,8 @@ final class AppModel {
     @ObservationIgnored private var characterTimer: Task<Void, Never>?
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// A terminal jump is in flight.
+    @ObservationIgnored private var jumping = false
     @ObservationIgnored private var inputTextCache: [String: ApprovalPresentation.InputDisplay] = [:]
 
     init(socketPath: String = IPCClient.defaultSocketPath()) {
@@ -78,6 +80,15 @@ final class AppModel {
     ///   pin                              toggles the pinned (expanded) island
     ///   hotkey allow|allow_session|deny  sends the shortcut's hot-key event
     ///                                    to the app, as a key press does
+    ///   jump <session-id>                jumps to the session's terminal, as
+    ///                                    tapping its row does; logs
+    ///                                    `jump <id> tty=<tty>: jumped|notFound|failed <message>`
+    ///   logsearch <text…>                runs the log window's search for the
+    ///                                    text (spaces and Korean allowed); logs
+    ///                                    `logsearch "<text>" mode=<label> results=<n>`
+    ///                                    or `logsearch "<text>" error <message>`
+    /// Every command logs `control <command>: done|ignored`; the results of
+    /// jump and logsearch follow when they finish.
     private func startDebugControl(path: String) {
         // The model lives as long as the app. A strong capture keeps these
         // closures Sendable; Swift 6.1 rejects sending a weak `self` (a
@@ -114,10 +125,35 @@ final class AppModel {
             if words.count == 2, let s = ApprovalShortcut.allCases.first(where: { $0.answer.rawValue == words[1] }) {
                 done = hotKeys.sendDebugPress(s)
             }
+        case "jump":
+            if words.count == 2, let s = state.sessions[words[1]], !jumping {
+                Task { await jump(to: s) }
+                done = true
+            }
+        case "logsearch":
+            let text = command.dropFirst("logsearch".count).trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty {
+                Task { await debugLogSearch(text) }
+                done = true
+            }
         default:
             break
         }
         FileHandle.standardError.write(Data("farero: control \(command): \(done ? "done" : "ignored")\n".utf8))
+    }
+
+    /// The log window's search (LogSearchModel) for `text`, with its result
+    /// on stderr.
+    private func debugLogSearch(_ text: String) async {
+        let search = LogSearchModel(app: self)
+        search.filter.query = text
+        await search.search()
+        if let error = search.error {
+            debugLog("logsearch \"\(text)\" error \(error)")
+        } else {
+            let mode = LogFilter.searchModeLabel(search.filter.query) ?? "-"
+            debugLog("logsearch \"\(text)\" mode=\(mode) results=\(search.calls.count)")
+        }
     }
 
     func start() {
@@ -259,18 +295,35 @@ final class AppModel {
 
     // MARK: - Terminal jump (F-11)
 
-    func jump(to session: Session) {
-        switch TerminalJumper.jump(tty: session.tty) {
-        case .jumped:
-            pinned = false
-        case .notFound:
-            showToast(TerminalJumper.notFoundMessage)
-        case .failed(let message):
-            showToast(message)
+    /// Brings the session's Terminal tab to the front; on success the
+    /// pinned island closes, otherwise the notch shows why. A request while
+    /// another jump is in flight (the Automation consent dialog may be up)
+    /// is ignored and returns nil.
+    @discardableResult
+    func jump(to session: Session) async -> TerminalJump.Outcome? {
+        guard !jumping else {
+            debugLog("jump \(session.id) tty=\(session.tty): busy")
+            return nil
         }
+        jumping = true
+        defer { jumping = false }
+        let outcome = await TerminalJumper.jump(tty: session.tty) { [weak self] in self?.debugLog($0) }
+        let result = switch outcome {
+        case .jumped: "jumped"
+        case .notFound: "notFound"
+        case .failed(let message): "failed \(message)"
+        }
+        debugLog("jump \(session.id) tty=\(session.tty): \(result)")
+        if let message = outcome.message {
+            showToast(message)
+        } else {
+            unpin()
+        }
+        return outcome
     }
 
     func showToast(_ message: String) {
+        debugLog("toast \(message)")
         toast = message
         toastTask?.cancel()
         toastTask = Task { [weak self] in
