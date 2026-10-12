@@ -19,7 +19,7 @@ Claude Code ──hooks──▶ farero-hook ──unix socket──▶ farerod 
 
 - `farerod`: the daemon. It runs as a login item and holds sessions, the approval queue, the policy, the gateway, the log (SQLite) and the tokens (Keychain).
 - `farero-hook`: a small helper that Claude Code runs for each hook event.
-- `Farero.app`: the UI.
+- `Farero.app`: the UI. It opens at login too, unless you turn that off in **Settings › 일반 › 로그인할 때 Farero 열기**.
 
 If the app isn't running, Claude Code is never blocked:
 - Its own permission prompts fall back to the terminal.
@@ -33,6 +33,7 @@ Requirements: macOS 15 or later (Apple silicon or Intel) and Claude Code v2.1.20
 2. **Move `Farero.app` to `/Applications` before you open it.** If you open it from Downloads, macOS runs a translocated copy from a random read-only path, and farero refuses to register its daemon from there and asks you to move it.
 3. The app is not notarized yet, so macOS blocks the first launch. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**. Since macOS 15, Control-click › Open no longer bypasses this.
 4. On first launch farero installs its daemon, `farerod`, as a LaunchAgent (`~/Library/LaunchAgents/dev.farero.farerod.plist`), and macOS shows a "Background Items Added" notification. Keep it on in **System Settings › General › Login Items & Extensions**. If it is off, farero tells you and opens that page.
+   The app also writes a second LaunchAgent, `~/Library/LaunchAgents/dev.farero.app.plist`, that opens Farero when you log in. Approval cards need the app, and while it is not running, gateway calls that need approval are refused. Turn it off in **Settings › 일반 › 로그인할 때 Farero 열기**. If you quit Farero from its menu, it stays closed until your next login.
 5. If macOS asks whether `farerod` may use its Keychain items (the gateway secret and plugin tokens), enter your login password and choose **Always Allow**. It asks again after every update. Until you answer, the app and hooks still work, but the gateway waits.
 6. In the app, register farero with Claude Code (**Settings › Claude Code**, or the setup assistant). farero shows a diff of the changes and asks for confirmation before writing anything.
 
@@ -78,7 +79,8 @@ The app checks GitHub Releases once at launch and then once a day, and shows a n
 
 ```sh
 launchctl bootout gui/$(id -u)/dev.farero.farerod
-rm ~/Library/LaunchAgents/dev.farero.farerod.plist
+launchctl bootout gui/$(id -u)/dev.farero.app
+rm ~/Library/LaunchAgents/dev.farero.farerod.plist ~/Library/LaunchAgents/dev.farero.app.plist
 rm -rf /Applications/Farero.app
 ```
 
@@ -96,6 +98,7 @@ security delete-generic-password -s dev.farero.farerod -a plugin.github.token
 ## Troubleshooting
 
 - **The daemon is not running.** Open **System Settings › General › Login Items & Extensions** and allow Farero to run in the background. The menu item **데몬 상태…** shows what the app sees. If registration failed, the menu offers **로그인 항목에서 데몬 허용…**.
+- **Farero does not open at login.** Check **Settings › 일반 › 로그인할 때 Farero 열기**. If it says the item is off in Login Items, allow Farero to run in the background in **System Settings › General › Login Items & Extensions**.
 - **The gateway does not start.** farerod reads the Keychain after it opens its socket. Until you answer the Keychain prompt, the gateway waits. If you chose **Deny**, the menu shows a gateway error and plugin tools are missing; restart the daemon to be asked again: `launchctl kickstart -k gui/$(id -u)/dev.farero.farerod`.
 - **Claude Code is too old.** farero does not register with Claude Code older than v2.1.203. Update Claude Code, then register again.
 - **You moved the app.** Hook and MCP paths point into the app bundle. On the next launch farero fixes the paths it added (after a backup) and tells you. If **Settings › Claude Code** still shows a stale path, click **다시 등록…**.

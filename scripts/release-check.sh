@@ -7,11 +7,13 @@
 #   pre           before installing: Claude Code present, no trace of farero
 #   download      after unzipping in ~/Downloads: checksum, quarantine, signature
 #   translocated  while Farero.app runs from ~/Downloads: nothing registered
-#   installed     after the first launch from /Applications: LaunchAgent, socket, gateway
+#   installed     after the first launch from /Applications: LaunchAgents of farerod
+#                 and of the app (opens it at login), socket, gateway
 #   registered    after registering with Claude Code: hooks, allow rule, MCP server
 #   log           after scenarios A-D: audit log rows and the decisions they need,
 #                 and no token in the log, the database or the Claude Code files
-#   reboot        after a restart and logging in again: farerod came back by itself
+#   reboot        after a restart and logging in again: farerod and the app came
+#                 back by themselves
 #   removed       after 설정 제거: Claude Code files without farero
 #   uninstalled   after the README uninstall: no trace left
 #
@@ -26,6 +28,10 @@ APP=/Applications/Farero.app
 LABEL=dev.farero.farerod
 SERVICE="gui/$(id -u)/$LABEL"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+# The app's own LaunchAgent, which opens it at login (Q85).
+APP_LABEL=dev.farero.app
+APP_SERVICE="gui/$(id -u)/$APP_LABEL"
+APP_PLIST="$HOME/Library/LaunchAgents/$APP_LABEL.plist"
 KEYCHAIN_SERVICE=dev.farero.farerod
 BUNDLE_ID=dev.farero.Farero
 SUPPORT="$HOME/Library/Application Support/Farero"
@@ -86,6 +92,8 @@ ver_ge() {
 
 app_version() { /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null; }
 farerod_pid() { launchctl print "$SERVICE" 2>/dev/null | awk '$1 == "pid" && $2 == "=" { print $3; exit }'; }
+# app_pid: the Farero.app process from /Applications (not the login hand-over).
+app_pid() { ps -axo pid=,command= | awk -v c="$APP/Contents/MacOS/Farero" '{ p = $1; sub(/^ *[0-9]+ /, ""); if ($0 == c) { print p; exit } }'; }
 # gateway_listen: the TCP addresses farerod listens on.
 gateway_listen() {
   local pid
@@ -123,6 +131,8 @@ claude_clean() {
 no_trace() {
   absent "no farerod job in launchd" launchctl print "$SERVICE"
   absent "no LaunchAgent plist" test -e "$PLIST"
+  absent "no app login job in launchd" launchctl print "$APP_SERVICE"
+  absent "no app login plist" test -e "$APP_PLIST"
   absent "no $APP" test -e "$APP"
   absent "no Application Support/Farero" test -e "$SUPPORT"
   absent "no Logs/Farero" test -e "$LOGS"
@@ -135,9 +145,12 @@ no_trace() {
     "Saved Application State/$BUNDLE_ID.savedState" "WebKit/$BUNDLE_ID"; do
     [ -e "$HOME/Library/$p" ] && warn "~/Library/$p is left (not covered by the README uninstall steps)"
   done
-  if launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -q "\"$LABEL\""; then
-    info "launchd still remembers $LABEL in print-disabled (harmless; the system keeps it)"
-  fi
+  local l
+  for l in "$LABEL" "$APP_LABEL"; do
+    if launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -q "\"$l\""; then
+      info "launchd still remembers $l in print-disabled (harmless; the system keeps it)"
+    fi
+  done
   return 0
 }
 
@@ -172,6 +185,27 @@ daemon_up() {
     fail "gateway listens only on 127.0.0.1 (it listens on $(echo $listen))"
   else
     ok "gateway listens on $(echo $listen)"
+  fi
+}
+
+# The app's login LaunchAgent opens /Applications/Farero.app (Q85): launchd
+# runs the app with --open-at-login, which hands over to /usr/bin/open.
+app_login_item() {
+  if [ ! -f "$APP_PLIST" ]; then
+    fail "app login plist exists ($APP_PLIST; 설정 > 일반 > 로그인할 때 Farero 열기 may be off)"
+    return
+  fi
+  local arg0 arg1 ral ka
+  arg0=$(plutil -extract ProgramArguments.0 raw -o - "$APP_PLIST" 2>/dev/null)
+  arg1=$(plutil -extract ProgramArguments.1 raw -o - "$APP_PLIST" 2>/dev/null)
+  ral=$(plutil -extract RunAtLoad raw -o - "$APP_PLIST" 2>/dev/null)
+  ka=$(plutil -extract KeepAlive raw -o - "$APP_PLIST" 2>/dev/null)
+  [ "$arg0 $arg1" = "$APP/Contents/MacOS/Farero --open-at-login" ] && ok "app login plist opens $APP" || fail "app login plist opens $APP (it runs: $arg0 $arg1)"
+  [ "$ral" = true ] && [ -z "$ka" ] && ok "app login plist runs once at load (RunAtLoad, no KeepAlive)" || fail "app login plist runs once at load (RunAtLoad=$ral KeepAlive=$ka)"
+  if launchctl print-disabled "gui/$(id -u)" 2>/dev/null | grep -q "\"$APP_LABEL\" => disabled"; then
+    fail "the app is allowed in Login Items (it is turned off)"
+  else
+    ok "the app is not turned off in Login Items"
   fi
 }
 
@@ -265,6 +299,7 @@ step_translocated() {
   fi
   absent "no LaunchAgent plist written" test -e "$PLIST"
   absent "no farerod job loaded" launchctl print "$SERVICE"
+  absent "no app login plist written" test -e "$APP_PLIST"
   claude_clean
 }
 
@@ -286,6 +321,7 @@ step_installed() {
   else
     fail "LaunchAgent plist exists ($PLIST)"
   fi
+  app_login_item
   daemon_up
   rv=$("$APP/Contents/MacOS/farerod" --version 2>/dev/null | awk '{ print $NF; exit }')
   [ "$rv" = "$ver" ] && ok "farerod --version is $ver" || fail "farerod --version is $ver (it is $rv)"
@@ -429,31 +465,47 @@ secret_scan() {
 }
 
 step_reboot() {
-  header "reboot: farerod came back after a restart"
-  local boot plist_t pid start
+  header "reboot: farerod and Farero came back after a restart"
+  local boot f t pid start
   boot=$(sysctl -n kern.boottime | sed -E 's/^\{ sec = ([0-9]+),.*/\1/')
   info "booted at $(fmt_time "$boot")"
-  if [ -f "$PLIST" ]; then
-    plist_t=$(stat -f %m "$PLIST")
-    info "LaunchAgent plist written at $(fmt_time "$plist_t")"
-    if [ "$boot" -gt "$plist_t" ]; then
-      ok "the Mac restarted after the LaunchAgent was written"
+  for f in "$PLIST" "$APP_PLIST"; do
+    if [ -f "$f" ]; then
+      t=$(stat -f %m "$f")
+      info "$(basename "$f") written at $(fmt_time "$t")"
+      if [ "$boot" -gt "$t" ]; then
+        ok "the Mac restarted after $(basename "$f") was written"
+      else
+        fail "the Mac restarted after $(basename "$f") was written (restart, log in, and run this again)"
+      fi
     else
-      fail "the Mac restarted after the LaunchAgent was written (restart, log in, and run this again)"
+      fail "LaunchAgent plist exists ($f)"
     fi
-  else
-    fail "LaunchAgent plist exists ($PLIST)"
-  fi
+  done
   daemon_up
   pid=$(farerod_pid)
   if [ -n "$pid" ]; then
     start=$(start_epoch "$pid")
     info "farerod started at $(fmt_time "${start:-0}")"
   fi
-  if ps -axo command= | grep -q "^$APP/Contents/MacOS/Farero$"; then
-    info "Farero.app is running"
+  app_login_item
+  if launchctl print "$APP_SERVICE" >/dev/null 2>&1; then
+    ok "launchd loaded $APP_LABEL at login"
+    launchctl print "$APP_SERVICE" 2>/dev/null | grep -E 'last exit code|runs =' | sed 's/^[[:space:]]*/         /' | tee -a "$REPORT" 2>/dev/null
   else
-    info "Farero.app is not running"
+    fail "launchd loaded $APP_LABEL at login"
+  fi
+  pid=$(app_pid)
+  if [ -z "$pid" ]; then
+    fail "Farero.app opened at login (it is not running)"
+  else
+    start=$(start_epoch "$pid")
+    info "Farero.app started at $(fmt_time "${start:-0}") (pid $pid)"
+    if [ -n "$start" ] && [ "$start" -gt "$boot" ]; then
+      ok "Farero.app opened at login (do not open it yourself before this step)"
+    else
+      fail "Farero.app opened at login (it started before the restart)"
+    fi
   fi
 }
 

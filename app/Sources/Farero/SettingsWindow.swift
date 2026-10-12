@@ -189,6 +189,8 @@ struct GeneralTab: View {
             if let error {
                 Banner(text: error, style: .error)
             }
+            // Kept by the app, so it works without farerod (Q85).
+            OpenAtLoginSection(item: model.openAtLogin)
             if let s = model.daemonSettings {
                 Section {
                     Picker("결과 저장 한도", selection: Binding(get: { s.resultLimitBytes }, set: { v in
@@ -219,7 +221,10 @@ struct GeneralTab: View {
             }
         }
         .formStyle(.grouped)
-        .task { await model.refreshDaemonSettings() }
+        .task {
+            model.openAtLogin.refresh()
+            await model.refreshDaemonSettings()
+        }
     }
 
     private func save(_ s: DaemonSettings) {

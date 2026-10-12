@@ -46,8 +46,8 @@
 - [ ] **Translocation 확인.** 아직 옮기지 말고 `~/Downloads/Farero.app`을 연다.
   - 기대: Gatekeeper 차단 창(“확인되지 않은 개발자” 계열)이 뜬다. 닫는다.
   - [ ] 시스템 설정 › 개인정보 보호 및 보안 아래 **그래도 열기**를 누르고 암호를 입력한 뒤 다시 연다.
-  - 기대: 앱이 “Applications로 옮겨 달라”는 안내를 띄우고 데몬을 등록하지 않는다. `ls ~/Library/LaunchAgents/dev.farero.farerod.plist`가 없음.
-  - [ ] 앱을 띄운 채로 ▶ `bash /Users/Shared/release-check.sh translocated` (`AppTranslocation` 경로에서 실행, LaunchAgent·Claude Code 설정 없음)
+  - 기대: 앱이 “Applications로 옮겨 달라”는 안내를 띄우고 데몬을 등록하지 않는다. `ls ~/Library/LaunchAgents/dev.farero.*`가 없음.
+  - [ ] 앱을 띄운 채로 ▶ `bash /Users/Shared/release-check.sh translocated` (`AppTranslocation` 경로에서 실행, LaunchAgent 두 개·Claude Code 설정 없음)
   - (이동 안내가 뜨지 않으면 기록하고 계속한다. README의 설명과 다르면 README 또는 앱을 고친다.)
 - [ ] 앱을 종료하고 `Farero.app`을 `/Applications`로 옮긴다(관리자 암호가 필요할 수 있다. 표준 계정이면 `~/Applications`가 아니라 `/Applications`로 옮길 수 있는지 기록한다).
 - [ ] `/Applications/Farero.app`을 연다.
@@ -56,11 +56,12 @@
 ### 3. 온보딩
 
 - [ ] 노치(또는 상단 가장자리)에 작은 등대가 나타난다. 메뉴바에 아이콘이 있다.
-- [ ] “백그라운드 항목이 추가됨” 알림이 뜬다. 시스템 설정 › 일반 › 로그인 항목 및 확장 프로그램에서 Farero가 켜져 있다.
+- [ ] “백그라운드 항목이 추가됨” 알림이 뜬다. 시스템 설정 › 일반 › 로그인 항목 및 확장 프로그램에서 Farero가 켜져 있다. 항목이 몇 개, 어떤 이름과 아이콘으로 보이는지 기록한다(farerod와 로그인 때 앱을 여는 항목, Q85).
+- [ ] 설정 도우미 1단계(데몬)에 **로그인할 때 Farero 열기**가 켜져 있다.
 - [ ] Keychain 확인 창이 뜨는지 기록한다. 첫 설치에서는 farerod가 만든 항목을 자기가 읽으므로 뜨지 않을 수 있다. 뜨면 암호 입력 + **항상 허용**.
   - 기대: 메뉴에 게이트웨이 오류가 없고, **데몬 상태…**가 연결됨을 보인다.
   - 터미널 확인: `launchctl print gui/$(id -u)/dev.farero.farerod | head`
-  - [ ] ▶ `bash /Users/Shared/release-check.sh installed` (LaunchAgent 경로, farerod 실행·버전, 소켓 0600, 게이트웨이가 127.0.0.1에서만 대기, Keychain 항목)
+  - [ ] ▶ `bash /Users/Shared/release-check.sh installed` (LaunchAgent 두 개의 경로, farerod 실행·버전, 소켓 0600, 게이트웨이가 127.0.0.1에서만 대기, Keychain 항목)
 - [ ] **설정 도우미…**(또는 첫 실행 창)에서 Claude Code 등록을 시작한다.
   - [ ] 변경 diff가 보인다(hooks, `permissions.allow`의 `mcp__farero__*`, MCP 서버 `farero`). 내용을 읽고 확인한다.
   - [ ] 확인 뒤 `~/.claude/settings.json`과 `claude mcp list`에 항목이 생기고, `~/Library/Application Support/Farero/backups`에 백업이 있다.
@@ -135,8 +136,10 @@
 - [ ] 로그 검색…: 한국어 단어(2글자 포함)로 검색해 결과가 나온다.
 - [ ] 설정 › 승인 정책에서 도구 단계를 바꿔 본다.
 - [ ] 설정 › 일반에서 **업데이트 확인**을 켜고 끌 수 있다. (프리릴리스만 있을 때 “새 버전” 표시가 없는 것은 정상: 업데이트 확인은 `releases/latest`를 보며 프리릴리스를 포함하지 않는다.)
-- [ ] 앱을 종료 후 재실행하고, 로그아웃/재부팅 뒤에도 데몬이 올라온다(LaunchAgent 유지).
-  - [ ] 재시동하고 이 계정으로 로그인한 뒤 ▶ `bash /Users/Shared/release-check.sh reboot` (재시동이 LaunchAgent 기록 뒤인지, farerod가 스스로 올라왔는지). 앱이 로그인 때 스스로 뜨는지도 기록한다.
+- [ ] 설정 › 일반에서 **로그인할 때 Farero 열기**를 끄면 `~/Library/LaunchAgents/dev.farero.app.plist`가 사라지고, 다시 켜면 생긴다. 켜 둔 채로 넘어간다.
+- [ ] 앱을 종료 후 재실행하고, 로그아웃/재부팅 뒤에도 데몬과 앱이 올라온다(LaunchAgent 유지).
+  - [ ] 재시동하고 이 계정으로 로그인한다. 앱을 직접 열지 말고 ▶ `bash /Users/Shared/release-check.sh reboot` (재시동이 두 LaunchAgent 기록 뒤인지, farerod가 스스로 올라왔는지, 로그인 때 launchd가 `dev.farero.app`을 실행해 Farero가 열렸는지).
+  - [ ] (선택) 시스템 설정 › 일반 › 로그인 항목 및 확장 프로그램에서 Farero의 앱 항목을 끄면 설정 › 일반에 “시스템 설정의 로그인 항목에서 꺼져 있음”이 뜨는지, `launchctl print-disabled gui/$(id -u) | grep farero`가 무엇을 보이는지 기록한다. 다시 켠다.
 - [ ] 업데이트 시나리오(가능하면): 이전 버전을 설치한 뒤 새 zip으로 `/Applications`의 앱을 교체해 열면 데몬이 새 버전으로 다시 시작되고 Keychain 확인 창이 다시 뜬다.
 
 ### 7. 정리
@@ -144,8 +147,8 @@
 - [ ] 설정 › Claude Code › **설정 제거…** → **설정 제거**. `settings.json`에 farero 항목이 없고 `claude mcp list`에 `farero`가 없다.
 - [ ] ▶ `bash /Users/Shared/release-check.sh removed` (farero 항목 없음, 등록 전 `settings.json`과 비교)
 - [ ] 앱 종료 후 README의 Uninstall 절차를 그대로 실행한다.
-  - [ ] `launchctl bootout gui/$(id -u)/dev.farero.farerod`
-  - [ ] `rm ~/Library/LaunchAgents/dev.farero.farerod.plist`, `rm -rf /Applications/Farero.app`
+  - [ ] `launchctl bootout gui/$(id -u)/dev.farero.farerod`, `launchctl bootout gui/$(id -u)/dev.farero.app`
+  - [ ] `rm ~/Library/LaunchAgents/dev.farero.farerod.plist ~/Library/LaunchAgents/dev.farero.app.plist`, `rm -rf /Applications/Farero.app`
   - [ ] `rm -rf ~/Library/Application\ Support/Farero ~/Library/Logs/Farero`
   - [ ] Keychain 항목(서비스 `dev.farero.farerod`) 삭제
   - [ ] `defaults delete dev.farero.Farero`
