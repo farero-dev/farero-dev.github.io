@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1010,9 +1011,110 @@ func TestPluginToolsReportsClassification(t *testing.T) {
 	if !slices.Equal(got.Missing, []string{"fail_sim"}) {
 		t.Errorf("missing: %v", got.Missing)
 	}
+	if !slices.IsSortedFunc(got.Tools, func(a, b ipc.PluginTool) int { return strings.Compare(a.Name, b.Name) }) {
+		t.Errorf("tools not sorted by name: %+v", got.Tools)
+	}
 
 	u.conn.Send(ipc.TypePluginTools, "g", ipc.PluginRef{Plugin: "github"})
 	if m := u.next(ipc.TypeError); !strings.Contains(string(m.Data), "not connected") {
 		t.Fatalf("expected not connected, got %s", m.Data)
+	}
+}
+
+// A hook event without a session id is acknowledged and ignored.
+func TestHookWithoutSessionIDIsIgnored(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	m := h.hookRaw(map[string]any{"hook_event_name": "SessionStart", "cwd": "/tmp/p"}, 100)
+	if m.Type != ipc.TypeHookAck {
+		t.Fatalf("reply: %+v", m)
+	}
+	if l := h.core.sessions.List(); len(l) != 0 {
+		t.Fatalf("sessions: %+v", l)
+	}
+}
+
+// An event from a hook that did not name its agent counts as Claude Code's.
+func TestHookAgentDefaultsToClaude(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	conn, err := ipc.Dial(h.sock, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	raw, _ := json.Marshal(map[string]any{"session_id": "s1", "hook_event_name": "SessionStart", "cwd": "/tmp/p"})
+	conn.Send(ipc.TypeHookEvent, "h", ipc.HookEvent{Input: raw, PID: 100})
+	if _, err := conn.Read(); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok := h.core.sessions.Get("claude:s1"); !ok || s.Agent != model.AgentClaude {
+		t.Fatalf("session: %+v %v", s, ok)
+	}
+}
+
+// The gateway port picked on the first run is saved and used again after a
+// restart (Claude Code's registration names it).
+func TestGatewayPortSurvivesRestart(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	ctx := context.Background()
+	port := h.core.GatewayInfo().Port
+	if saved, _ := h.st.Setting(ctx, settingGatewayPort); port == 0 || saved != strconv.Itoa(port) {
+		t.Fatalf("port %d, saved %q", port, saved)
+	}
+	h.core.Shutdown(ctx)
+	h2 := startHarness(t, h.st, devTable(), time.Minute, nil)
+	if got := h2.core.GatewayInfo(); !got.Running || got.Port != port {
+		t.Fatalf("after restart: %+v, want port %d", got, port)
+	}
+}
+
+// Exposed tools are sorted by name and keep the upstream's input schema.
+func TestExposedToolsSortedWithSchema(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	h.core.mu.Lock()
+	tools := slices.Clone(h.core.tools)
+	h.core.mu.Unlock()
+	if len(tools) < 2 || !slices.IsSortedFunc(tools, func(a, b *mcp.Tool) int { return strings.Compare(a.Name, b.Name) }) {
+		t.Fatalf("tools not sorted: %d", len(tools))
+	}
+	for _, x := range tools {
+		if x.Name == "dev_write_sim" {
+			if b, _ := json.Marshal(x.InputSchema); !strings.Contains(string(b), `"text"`) {
+				t.Fatalf("schema replaced: %s", b)
+			}
+			return
+		}
+	}
+	t.Fatal("dev_write_sim not exposed")
+}
+
+// Upstream tools missing from the table are logged once per change, not on
+// every refresh.
+func TestHiddenToolsLoggedOnChange(t *testing.T) {
+	var logs syncBuffer
+	h := startHarness(t, memStore(t), devTable(), time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	h.core.RefreshTools(context.Background())
+	const msg = "not in the classification table are hidden"
+	if n := strings.Count(logs.String(), msg); n != 1 {
+		t.Fatalf("logged %d times:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "unclassified_sim") {
+		t.Fatalf("hidden tool not named:\n%s", logs.String())
+	}
+}
+
+// The app gets an error for an answer to a card that is not open, and OK
+// for a real one.
+func TestApprovalResponseReplies(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	u.conn.Send(ipc.TypeApprovalResponse, "x", ipc.ApprovalResponse{ApprovalID: "nope", Answer: model.AnswerAllow})
+	if m := u.reply("x"); m.Type != ipc.TypeError {
+		t.Fatalf("unknown card: %+v", m)
+	}
+	go h.hook("s1", "PermissionRequest", "Bash", map[string]any{"command": "ls"}, 100)
+	ap := u.approval()
+	u.answer(ap.ID, model.AnswerDeny)
+	if m := u.reply("r-" + ap.ID); m.Type != ipc.TypeOK {
+		t.Fatalf("real card: %+v", m)
 	}
 }
