@@ -526,3 +526,11 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
 - 세 실행 파일 모두 `x86_64 arm64`, ad-hoc 서명 `--strict` 검증 통과, `spctl`은 `rejected`(미공증, 예상대로). zip 약 17MB, 풀어도 서명 유지.
 - Intel(Q37): Rosetta로 farerod·farero-hook `--version`이 `0.1.0-beta.1`, x86_64 farerod(`--dev`)와 앱이 개발 모드로 떠 있었다.
 - 확인하지 못한 것: Gatekeeper "그래도 열기"와 Translocation 안내는 격리 속성이 붙은 파일이 필요해 새 계정 확인(체크리스트 b)에서 본다. 첫 설치에서 키체인 확인 창이 뜨는지도 거기서 기록한다(farerod가 만든 항목은 자기가 읽으므로 뜨지 않을 것으로 본다).
+
+### M8 새 계정 확인 준비
+
+- `scripts/release-check.sh <단계>`: 새 macOS 계정에서 체크리스트 (b)의 상태 확인을 대신하는 읽기 전용 스크립트. 단계는 `pre`·`download`·`translocated`·`installed`·`registered`·`log`·`reboot`·`removed`·`uninstalled`. 새 계정에는 jq·python이 없으므로 JSON은 JavaScript for Automation(`osascript -l JavaScript`)으로 읽는다. Keychain은 항목 속성만 읽어 확인 창이 뜨지 않는다. 결과는 `/Users/Shared/farero-check-<계정>.md`에 쌓여 개발 계정에서 읽는다.
+- `log` 단계는 감사 로그로 시나리오 A–D를 판정한다. 에이전트 도구는 카드에 답하면 `reason`에 답(`allow_session` 또는 빈 값)만 남고 물은 이유(오염)는 남지 않아서, C의 "오염 뒤 셸 명령 다시 물음"은 같은 세션에서 세션 허용됐던 같은 명령(`$.command`)이 오염 뒤 카드로 답해졌는지로 본다. 로그·DB·설정 파일에 토큰 모양 문자열이 있으면 실패로 본다.
+- 시험: 실제 `v0.1.0-beta.1` zip(체크섬·격리 속성·서명·Universal 통과), e2e DB 사본으로 A–D 판정(오염 뒤 세션 허용과 토큰 노출을 일부러 넣으면 FAIL), 실제 `agentcfg` 등록·제거 결과로 `registered`·`removed`, 이 맥의 데몬으로 `installed`. `translocated`는 Gatekeeper 창이 떠서 개발 계정에서 실행하지 않았다.
+- 체크리스트: ▶ 표시에서 스크립트를 실행하도록 넣었고, A와 C는 같은 세션에서 이어서 하도록 적었다(C의 마지막 항목이 A의 세션 허용을 쓴다).
+- 결정 필요: 앱(UI)은 로그인 때 스스로 뜨지 않는다(데몬만 LaunchAgent, 명세에도 앱 자동 실행은 없음). 앱이 꺼져 있으면 승인 단계 게이트웨이 호출이 자동 거부되므로 재부팅 뒤 앱을 직접 열어야 한다. 에이전트 도구 카드의 물은 이유를 로그에 남길지도 정해야 한다.
