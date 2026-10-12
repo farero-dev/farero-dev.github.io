@@ -1,8 +1,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"sort"
@@ -239,5 +242,97 @@ func TestBothProtocols(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Tools that did not change are skipped without stopping the update: every
+// new tool is still added, whichever comes first.
+func TestSetToolsAddsAfterUnchanged(t *testing.T) {
+	g, _, _ := start(t)
+	var tools []*mcp.Tool
+	for i := 0; i < 20; i++ {
+		tools = append(tools, tool(fmt.Sprintf("dev_t%02d", i)))
+	}
+	g.SetTools(tools)
+	for round := 0; round < 5; round++ {
+		tools = append(tools, tool(fmt.Sprintf("dev_new%d", round)))
+		g.SetTools(tools)
+		if names := g.ToolNames(); len(names) != len(tools) || !slices.Contains(names, fmt.Sprintf("dev_new%d", round)) {
+			t.Fatalf("round %d: %d tools listed, want %d", round, len(names), len(tools))
+		}
+	}
+}
+
+// Shutdown closes the listener; a second Shutdown is a no-op.
+func TestShutdownStopsListening(t *testing.T) {
+	g, _, port := start(t)
+	if err := g.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if g.Port() != 0 {
+		t.Fatalf("port after shutdown: %d", g.Port())
+	}
+	req, _ := http.NewRequest("POST", URL(port), strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer s3cret")
+	if resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req); err == nil {
+		resp.Body.Close()
+		t.Fatalf("still serving after shutdown: %d", resp.StatusCode)
+	}
+	if err := g.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second shutdown: %v", err)
+	}
+}
+
+// syncBuffer is a log destination safe for concurrent writers.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// The request log names the protocol, the client and the connection id, at
+// connection setup and on later requests (M4: which protocol an agent
+// speaks is read from here).
+func TestRequestLogNamesProtocolClientAndConn(t *testing.T) {
+	var logs syncBuffer
+	g := New("test", "s3cret", &recCaller{}, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	g.SetTools([]*mcp.Tool{tool("dev_echo")})
+	port, err := g.Start(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { g.Shutdown(context.Background()) })
+	cs, err := connect(t, port, map[string]string{"Authorization": "Bearer s3cret", ConnHeader: "4242.abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	if _, err := cs.ListTools(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	var setup, list string
+	for _, line := range strings.Split(logs.String(), "\n") {
+		switch {
+		case strings.Contains(line, "method=initialize") || strings.Contains(line, "method=server/discover"):
+			setup = line
+		case strings.Contains(line, "method=tools/list"):
+			list = line
+		}
+	}
+	for name, line := range map[string]string{"setup": setup, "tools/list": list} {
+		if !strings.Contains(line, "protocol=") || !strings.Contains(line, `client="t 1"`) || !strings.Contains(line, "conn=4242.abc") {
+			t.Errorf("%s log line: %q\n%s", name, line, logs.String())
+		}
 	}
 }
