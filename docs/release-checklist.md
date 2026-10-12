@@ -2,6 +2,8 @@
 
 두 부분이다. (a) 릴리스 절차, (b) 깨끗한 계정에서 Releases 파일로 시나리오 A–E를 확인하는 절차(M8 완료 기준). 먼저 `v0.1.0-beta.1`(프리릴리스)로 (b)까지 통과시키고, 문제가 없으면 `v0.1.0`을 낸다.
 
+(b)의 상태 확인은 `scripts/release-check.sh <단계>`가 대신한다. 읽기만 하는 스크립트이고(설치·Claude Code 설정·Keychain을 바꾸지 않는다), 결과를 화면과 `/Users/Shared/farero-check-<계정>.md`에 남긴다. 개발 계정에서 이 파일을 읽어 결과를 기록한다. 아래에서 `▶ check <단계>`로 표시한 곳에서 실행한다.
+
 ## a) 릴리스 절차
 
 태그 이름
@@ -26,22 +28,26 @@
 
 ### 1. 계정 준비
 
-- [ ] 시스템 설정 › 사용자 및 그룹 › 계정 추가 › **표준** 사용자(예: `frtest`)를 만든다. 관리자 아님.
+- [ ] 시스템 설정 › 사용자 및 그룹 › 계정 추가 › **표준** 사용자(예: `frtest`)를 만든다. 관리자 아님. 터미널로는 `sudo sysadminctl -addUser frtest -fullName "Farero Test" -password -`(암호를 묻는다, `-admin`을 붙이지 않으면 표준 계정).
+- [ ] 개발 계정에서 스크립트를 공용 폴더에 둔다. `cp scripts/release-check.sh /Users/Shared/`
 - [ ] 그 계정으로 로그인한다(빠른 사용자 전환).
 - [ ] Terminal.app을 연다(점프는 Terminal.app만 지원한다).
 - [ ] Claude Code를 설치하고(`claude --version`이 2.1.203 이상) 로그인한다. 설치 방법은 Claude Code 문서를 따른다.
 - [ ] 아무 폴더(예: `~/work/demo`)를 만들고 거기서 `claude`가 뜨는지 본다. 신뢰 여부 질문에는 허용한다. 확인 후 종료한다.
 - [ ] `~/.claude/settings.json`에 farero 항목이 없고 `claude mcp list`에 `farero`가 없음을 확인한다.
+- [ ] ▶ `bash /Users/Shared/release-check.sh pre` (macOS·Claude Code 버전, 표준 계정, farero 흔적 없음)
 
 ### 2. 내려받기와 Gatekeeper
 
 - [ ] 이 계정의 Safari/Chrome으로 Releases 페이지에서 zip과 `.sha256`을 받는다.
 - [ ] `shasum -a 256 -c Farero-<버전>.zip.sha256` → `OK`
 - [ ] zip을 푼다(더블클릭). `~/Downloads/Farero.app`이 생긴다.
+- [ ] ▶ `bash /Users/Shared/release-check.sh download` (체크섬, 격리 속성, 서명, Universal, 버전)
 - [ ] **Translocation 확인.** 아직 옮기지 말고 `~/Downloads/Farero.app`을 연다.
   - 기대: Gatekeeper 차단 창(“확인되지 않은 개발자” 계열)이 뜬다. 닫는다.
   - [ ] 시스템 설정 › 개인정보 보호 및 보안 아래 **그래도 열기**를 누르고 암호를 입력한 뒤 다시 연다.
   - 기대: 앱이 “Applications로 옮겨 달라”는 안내를 띄우고 데몬을 등록하지 않는다. `ls ~/Library/LaunchAgents/dev.farero.farerod.plist`가 없음.
+  - [ ] 앱을 띄운 채로 ▶ `bash /Users/Shared/release-check.sh translocated` (`AppTranslocation` 경로에서 실행, LaunchAgent·Claude Code 설정 없음)
   - (이동 안내가 뜨지 않으면 기록하고 계속한다. README의 설명과 다르면 README 또는 앱을 고친다.)
 - [ ] 앱을 종료하고 `Farero.app`을 `/Applications`로 옮긴다(관리자 암호가 필요할 수 있다. 표준 계정이면 `~/Applications`가 아니라 `/Applications`로 옮길 수 있는지 기록한다).
 - [ ] `/Applications/Farero.app`을 연다.
@@ -54,10 +60,12 @@
 - [ ] Keychain 확인 창이 뜨는지 기록한다. 첫 설치에서는 farerod가 만든 항목을 자기가 읽으므로 뜨지 않을 수 있다. 뜨면 암호 입력 + **항상 허용**.
   - 기대: 메뉴에 게이트웨이 오류가 없고, **데몬 상태…**가 연결됨을 보인다.
   - 터미널 확인: `launchctl print gui/$(id -u)/dev.farero.farerod | head`
+  - [ ] ▶ `bash /Users/Shared/release-check.sh installed` (LaunchAgent 경로, farerod 실행·버전, 소켓 0600, 게이트웨이가 127.0.0.1에서만 대기, Keychain 항목)
 - [ ] **설정 도우미…**(또는 첫 실행 창)에서 Claude Code 등록을 시작한다.
   - [ ] 변경 diff가 보인다(hooks, `permissions.allow`의 `mcp__farero__*`, MCP 서버 `farero`). 내용을 읽고 확인한다.
   - [ ] 확인 뒤 `~/.claude/settings.json`과 `claude mcp list`에 항목이 생기고, `~/Library/Application Support/Farero/backups`에 백업이 있다.
   - [ ] 설정 › Claude Code 탭의 세 항목(훅, 자동 허용 규칙, MCP 서버)이 모두 체크된다.
+  - [ ] ▶ `bash /Users/Shared/release-check.sh registered` (훅 10종·timeout 660, `mcp__farero__*`, MCP 서버 항목과 게이트웨이 포트, 백업, `claude mcp get farero` 연결됨)
 - [ ] 플러그인 연결(선택). 시나리오 B·C·D를 하려면 아래 4번 준비를 한다. 연결하지 않으면 B·C를 건너뛴다고 기록한다.
 
 ### 4. 플러그인 준비 (시나리오 B, C, D용)
@@ -73,7 +81,7 @@
 
 ### 5. 시나리오 (기능 명세서 3장)
 
-각 시나리오는 이 계정의 Terminal.app에서 `cd ~/work/demo && claude --permission-mode default`로 연 세션에서 한다(자동 모드는 카드를 건너뛰므로 쓰지 않는다).
+각 시나리오는 이 계정의 Terminal.app에서 `cd ~/work/demo && claude --permission-mode default`로 연 세션에서 한다(자동 모드는 카드를 건너뛰므로 쓰지 않는다). **A와 C는 같은 세션에서 이어서 한다.** C의 마지막 항목이 A에서 세션 허용한 `npm install`을 다시 시킨다. 세션을 새로 열었다면 C를 시작하기 전에 `npm install`을 한 번 시켜 **이번 세션 동안 허용**을 누른다.
 
 **A. 셸 명령 승인**
 - [ ] 프롬프트: `Run this exact shell command with the Bash tool: npm install`
@@ -110,6 +118,7 @@
   - 기대: 자동 거부, 모델이 “앱이 실행 중이 아니라 승인할 수 없음” 이유를 받는다. PR은 만들어지지 않는다.
 - [ ] 터미널에서 Bash 권한이 필요한 명령을 시키면 Claude Code 자체 프롬프트로 넘어간다(`PermissionRequest`가 결정 없이 끝남).
 - [ ] 앱을 다시 연다(`open /Applications/Farero.app`). 기대: 데몬에 다시 연결되고 세션이 목록에 보인다. 로그에 자동 거부와 “터미널로 넘김”이 남는다.
+- [ ] ▶ `bash /Users/Shared/release-check.sh log` (감사 로그로 A–D 판정: A 허용·거부·세션 허용, B 재배포 허용, C 세션 허용 → 오염 → 다시 묻고 거부, 오염 뒤 셸 명령 다시 물음, D 자동 허용·자동 거부·터미널로 넘김, 세션 불명 0건, 로그·DB·설정 파일에 토큰 원문 없음). B·C를 건너뛰었으면 그 항목은 FAIL로 나온다.
 
 **E. 터미널 점프**
 - [ ] Terminal.app 창 두 개에서 각각 다른 폴더로 `claude` 세션을 열고 아무 프롬프트를 하나씩 보낸다. 세 번째 창(셸만)을 맨 앞에 둔다.
@@ -127,11 +136,13 @@
 - [ ] 설정 › 승인 정책에서 도구 단계를 바꿔 본다.
 - [ ] 설정 › 일반에서 **업데이트 확인**을 켜고 끌 수 있다. (프리릴리스만 있을 때 “새 버전” 표시가 없는 것은 정상: 업데이트 확인은 `releases/latest`를 보며 프리릴리스를 포함하지 않는다.)
 - [ ] 앱을 종료 후 재실행하고, 로그아웃/재부팅 뒤에도 데몬이 올라온다(LaunchAgent 유지).
+  - [ ] 재시동하고 이 계정으로 로그인한 뒤 ▶ `bash /Users/Shared/release-check.sh reboot` (재시동이 LaunchAgent 기록 뒤인지, farerod가 스스로 올라왔는지). 앱이 로그인 때 스스로 뜨는지도 기록한다.
 - [ ] 업데이트 시나리오(가능하면): 이전 버전을 설치한 뒤 새 zip으로 `/Applications`의 앱을 교체해 열면 데몬이 새 버전으로 다시 시작되고 Keychain 확인 창이 다시 뜬다.
 
 ### 7. 정리
 
 - [ ] 설정 › Claude Code › **설정 제거…** → **설정 제거**. `settings.json`에 farero 항목이 없고 `claude mcp list`에 `farero`가 없다.
+- [ ] ▶ `bash /Users/Shared/release-check.sh removed` (farero 항목 없음, 등록 전 `settings.json`과 비교)
 - [ ] 앱 종료 후 README의 Uninstall 절차를 그대로 실행한다.
   - [ ] `launchctl bootout gui/$(id -u)/dev.farero.farerod`
   - [ ] `rm ~/Library/LaunchAgents/dev.farero.farerod.plist`, `rm -rf /Applications/Farero.app`
@@ -139,6 +150,7 @@
   - [ ] Keychain 항목(서비스 `dev.farero.farerod`) 삭제
   - [ ] `defaults delete dev.farero.Farero`
 - [ ] 위 절차대로 하면 흔적이 남지 않는지 확인한다(`launchctl list | grep farero`, `ls ~/Library/Application\ Support | grep -i farero`).
+- [ ] ▶ `bash /Users/Shared/release-check.sh uninstalled` (launchd 작업, 파일, Keychain 항목, 환경설정, Claude Code 설정. README 절차에 없는 `~/Library/Caches`·`HTTPStorages` 등은 warn)
 - [ ] 외부 자원 정리: `farero-dev/farero-e2e`의 테스트 이슈를 닫고, 연결했던 Railway·GitHub·Resend 앱 승인을 각 서비스의 설정에서 취소한다.
 - [ ] 테스트 계정으로 로그아웃하고 원래 계정에서 시스템 설정 › 사용자 및 그룹 › 계정 삭제(홈 폴더 삭제 선택).
-- [ ] 결과를 기록한다: 통과/실패 항목, 예상과 달랐던 점(특히 이동 안내, Keychain 창 횟수), 필요한 수정은 이슈로 만든다.
+- [ ] 결과를 기록한다: 통과/실패 항목, 예상과 달랐던 점(특히 이동 안내, Keychain 창 횟수), 필요한 수정은 이슈로 만든다. 스크립트 결과는 `/Users/Shared/farero-check-frtest.md`에 모여 있다(계정을 지워도 남는다).
