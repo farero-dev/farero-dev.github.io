@@ -363,8 +363,9 @@ func TestCheckInterruptsSameMtimeNewSize(t *testing.T) {
 	}
 }
 
-// Every session is checked, whatever the others look like: waiting ones
-// are skipped and transcripts without a marker leave theirs alone.
+// Every session is checked, whatever the others look like: waiting ones and
+// ones whose transcript did not grow are skipped, and transcripts without a
+// marker leave theirs alone.
 func TestCheckInterruptsVisitsEverySession(t *testing.T) {
 	m, _, _ := newManager(t)
 	dir := t.TempDir()
@@ -376,6 +377,10 @@ func TestCheckInterruptsVisitsEverySession(t *testing.T) {
 		writeTranscript(t, quiet, rowPrompt)
 		probeSession(t, m, fmt.Sprintf("q%d", i), quiet, EventUserPromptSubmit)
 		appendTranscript(t, quiet, rowToolUse)
+		// Nothing written since its last event.
+		idle := filepath.Join(dir, fmt.Sprintf("i%d.jsonl", i))
+		writeTranscript(t, idle, rowPrompt)
+		probeSession(t, m, fmt.Sprintf("i%d", i), idle, EventUserPromptSubmit)
 	}
 	target := filepath.Join(dir, "target.jsonl")
 	writeTranscript(t, target, rowPrompt)

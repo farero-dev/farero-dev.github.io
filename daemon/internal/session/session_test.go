@@ -424,8 +424,9 @@ func TestSweepBoundaries(t *testing.T) {
 }
 
 // One Sweep handles every session, whatever comes before it in the map:
-// ended, alive, newly dead and recently heard sessions are skipped, and
-// both a dead agent and a silent session still become unknown.
+// ended, alive, newly dead, dead within the grace and recently heard
+// sessions are skipped, and both a dead agent and a silent session still
+// become unknown.
 func TestSweepVisitsEverySession(t *testing.T) {
 	m, _, _ := newManager(t)
 	ctx := context.Background()
@@ -439,17 +440,22 @@ func TestSweepVisitsEverySession(t *testing.T) {
 		apply(fmt.Sprintf("ended%d", i), EventSessionEnd, 1000+i)
 		apply(fmt.Sprintf("alive%d", i), EventStop, 2000+i)
 		alive[2000+i] = true
+		apply(fmt.Sprintf("new%d", i), EventStop, 3000+i)   // dead, first seen by this Sweep
+		apply(fmt.Sprintf("grace%d", i), EventStop, 4000+i) // dead for less than ExitGrace
 	}
 	apply("dead", EventStop, 100)
 	apply("silent", EventStop, 0)
-	isAlive := func(pid int, _ time.Time) bool { return alive[pid] }
-	m.Sweep(ctx, isAlive) // "dead" is first seen dead
 	clock = clock.Add(UnknownAfter)
 	for i := 0; i < 10; i++ {
-		apply(fmt.Sprintf("new%d", i), EventStop, 3000+i) // dead, first seen now
-		apply(fmt.Sprintf("heard%d", i), EventStop, 0)    // no PID, just heard from
+		apply(fmt.Sprintf("heard%d", i), EventStop, 0) // no PID, just heard from
 	}
-	got := m.Sweep(ctx, isAlive)
+	m.mu.Lock()
+	m.deadSince["claude:dead"] = clock.Add(-ExitGrace)
+	for i := 0; i < 10; i++ {
+		m.deadSince[fmt.Sprintf("claude:grace%d", i)] = clock.Add(-time.Second)
+	}
+	m.mu.Unlock()
+	got := m.Sweep(ctx, func(pid int, _ time.Time) bool { return alive[pid] })
 	if len(got) != 1 || got[0] != 100 {
 		t.Fatalf("dead PIDs: %v", got)
 	}
@@ -458,7 +464,7 @@ func TestSweepVisitsEverySession(t *testing.T) {
 			t.Errorf("%s: %s", id, s.Status)
 		}
 	}
-	for _, id := range []string{"alive3", "new3", "heard3"} {
+	for _, id := range []string{"alive3", "new3", "grace3", "heard3"} {
 		if s, _ := m.Get("claude:" + id); s.Status != model.StatusWaitingInput {
 			t.Errorf("%s: %s", id, s.Status)
 		}
