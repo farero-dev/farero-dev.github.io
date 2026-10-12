@@ -1092,6 +1092,9 @@ func TestExposedToolsSortedWithSchema(t *testing.T) {
 func TestHiddenToolsLoggedOnChange(t *testing.T) {
 	var logs syncBuffer
 	h := startHarness(t, memStore(t), devTable(), time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	// Startup refreshed once; two more refreshes with the same tools must
+	// not log again.
+	h.core.RefreshTools(context.Background())
 	h.core.RefreshTools(context.Background())
 	const msg = "not in the classification table are hidden"
 	if n := strings.Count(logs.String(), msg); n != 1 {
