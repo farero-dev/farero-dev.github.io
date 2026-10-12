@@ -127,9 +127,13 @@ func (h *harness) ui() *fakeUI {
 	return u
 }
 
+// waitTimeout bounds how long the fake app waits for a message. The tests
+// with inputs over 1 MB take a few seconds under -race on GitHub's runners.
+const waitTimeout = 15 * time.Second
+
 func (u *fakeUI) next(typ string) ipc.Message {
 	u.t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case m, ok := <-u.msgs:
@@ -148,7 +152,7 @@ func (u *fakeUI) next(typ string) ipc.Message {
 // reply waits for the reply to request id, whatever its type.
 func (u *fakeUI) reply(id string) ipc.Message {
 	u.t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case m, ok := <-u.msgs:
@@ -796,12 +800,12 @@ func inputObject(t *testing.T, raw json.RawMessage, limit int, key, want string)
 	return m
 }
 
-// A Write of a multi-MB file: the card and the log row stay bounded, while
+// A Write of a file over 1 MB: the card and the log row stay bounded, while
 // the whole content is what policy and the agent see.
 func TestApprovalCardBoundsAgentInput(t *testing.T) {
 	h := newHarness(t, time.Minute)
 	u := h.ui()
-	big := strings.Repeat("나", 1<<20) // 3 MB
+	big := strings.Repeat("나", 400_000) // 1.2 MB, over the 1 MiB card bound
 	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/big", "content": big}, 1)
 	ap := u.approval()
 	m := inputObject(t, ap.Input, 1<<20, "file_path", "/tmp/big")
@@ -821,13 +825,13 @@ func TestApprovalCardBoundsAgentInput(t *testing.T) {
 	inputObject(t, c.Input, 8<<10, "file_path", "/tmp/big")
 }
 
-// A plugin call with a multi-MB argument (a Resend attachment) reaches the
+// A plugin call with an argument over 1 MB (a Resend attachment) reaches the
 // upstream unchanged; only the card and the row are bounded.
 func TestUpstreamGetsFullPluginInput(t *testing.T) {
 	h := newHarness(t, time.Minute)
 	u := h.ui()
 	a := h.agent("s1", 100)
-	big := strings.Repeat("Zm9v", 1<<20) // 4 MB
+	big := strings.Repeat("Zm9v", 300_000) // 1.2 MB, over the 1 MiB card bound
 	ch := a.callAsync("dev_write_sim", map[string]any{"text": big, "to": "a@b.c"})
 	ap := u.approval()
 	inputObject(t, ap.Input, 1<<20, "to", "a@b.c")
@@ -844,7 +848,7 @@ func TestUpstreamGetsFullPluginInput(t *testing.T) {
 	if stored.Decision != model.DecisionUserAllowed || stored.SessionID != "claude:s1" {
 		t.Fatalf("log: %+v", stored)
 	}
-	// The 4 MB result: the row keeps the Q46 budget, call.logged 2 KB, and
+	// The 1.2 MB result: the row keeps the Q46 budget, call.logged 2 KB, and
 	// both carry the full size.
 	resultBytes := len("wrote: ") + len(big)
 	if len(stored.ResultText) > store.DefaultResultLimit || stored.ResultBytes != resultBytes {
@@ -858,12 +862,12 @@ func TestUpstreamGetsFullPluginInput(t *testing.T) {
 }
 
 // A session grant for a Bash command is scoped by the whole command (Q38),
-// not by the bounded copy on the card: the same 2 MB command runs without a
+// not by the bounded copy on the card: the same 1.2 MB command runs without a
 // card, and one that differs only past what the card shows still asks.
 func TestSessionGrantUsesFullAgentInput(t *testing.T) {
 	h := newHarness(t, time.Minute)
 	u := h.ui()
-	cmdA := strings.Repeat("a", 2<<20)
+	cmdA := strings.Repeat("a", 1_200_000) // over the 1 MiB card bound
 	cmdB := cmdA[:len(cmdA)-1] + "b"
 	bash := func(cmd string) chan ipc.HookDecision {
 		done := make(chan ipc.HookDecision, 1)
