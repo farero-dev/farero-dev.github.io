@@ -162,9 +162,19 @@ func TestInstallIntoMissingFile(t *testing.T) {
 	if st.BackupPath != "" || !st.HooksInstalled {
 		t.Fatalf("%+v", st)
 	}
-	st, _ = c.Remove(context.Background())
+	st, err = c.Remove(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if b, err := os.ReadFile(c.settingsPath()); !os.IsNotExist(err) {
 		t.Fatalf("farero created settings.json, so remove should delete it: %s %v", b, err)
+	}
+	// The deleted file is backed up and the record of the original goes.
+	if st.BackupPath == "" {
+		t.Fatalf("no backup of the deleted file: %+v", st)
+	}
+	if _, err := os.Stat(c.originalPath()); !os.IsNotExist(err) {
+		t.Fatalf("original record left behind: %v", err)
 	}
 }
 
@@ -325,13 +335,15 @@ func TestParseVersion(t *testing.T) {
 }
 
 func TestInvalidSettingsAreNotTouched(t *testing.T) {
-	c, _ := setup(t, `{"hooks": [`)
-	if _, err := c.Apply(context.Background()); err == nil {
-		t.Fatal("expected an error for invalid JSON")
-	}
-	b, _ := os.ReadFile(c.settingsPath())
-	if string(b) != `{"hooks": [` {
-		t.Fatal("invalid file was modified")
+	// Broken JSON, and valid JSON that is not an object.
+	for _, bad := range []string{`{"hooks": [`, `[]`, `"x"`, `[{"hooks": {}}]`} {
+		c, _ := setup(t, bad)
+		if _, err := c.Apply(context.Background()); err == nil {
+			t.Errorf("%s: expected an error", bad)
+		}
+		if b, _ := os.ReadFile(c.settingsPath()); string(b) != bad {
+			t.Errorf("%s: file was modified to %s", bad, b)
+		}
 	}
 }
 
@@ -445,6 +457,121 @@ func TestApplyRewriteMessage(t *testing.T) {
 		if !strings.Contains(st.Message, "다시 썼습니다") || !strings.Contains(st.Message, "일부 빠졌습니다") {
 			t.Errorf("%s: %q", name, st.Message)
 		}
+	}
+}
+
+// Every hook event is checked: one event missing farero's hook does not
+// hide a stale path in the others.
+func TestHooksStateChecksEveryEvent(t *testing.T) {
+	c, _ := setup(t, userSettings)
+	ctx := context.Background()
+	if _, err := c.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	o := mustParse(t, readFile(t, c.settingsPath()))
+	hooks, _ := o.child("hooks")
+	hooks.del(hookEvents[0])
+	o.set("hooks", mustRaw(hooks))
+	out, _ := pretty(o)
+	os.WriteFile(c.settingsPath(), out, 0o644)
+	c.HookPath = "/Users/me/Applications/Farero.app/Contents/MacOS/farero-hook"
+	// hooksState itself: Status would also flag the MCP entry, whose
+	// headersHelper names the old path too.
+	installed, present, stale := c.hooksState(mustParse(t, readFile(t, c.settingsPath())))
+	if installed || !present || !stale {
+		t.Fatalf("installed=%v present=%v stale=%v", installed, present, stale)
+	}
+}
+
+// Without the record of the original, Remove cannot know farero created
+// settings.json: it leaves an empty object instead of deleting the file.
+func TestRemoveWithoutOriginalKeepsFile(t *testing.T) {
+	c, _ := setup(t, "")
+	ctx := context.Background()
+	if _, err := c.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(c.originalPath()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !sameJSON(readFile(t, c.settingsPath()), "{}") {
+		t.Fatalf("settings: %q", readFile(t, c.settingsPath()))
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// A user hook that shares a matcher entry with farero's, before or after
+// it, stays when farero is removed.
+func TestRemoveKeepsUserHookInFareroEntry(t *testing.T) {
+	c, _ := setup(t, "")
+	ctx := context.Background()
+	if _, err := c.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	json.Unmarshal([]byte(readFile(t, c.settingsPath())), &doc)
+	entries := doc["hooks"].(map[string]any)["PreToolUse"].([]any)
+	entry := entries[0].(map[string]any)
+	user := map[string]any{"type": "command", "command": "/usr/local/bin/audit-tool"}
+	entry["hooks"] = append(entry["hooks"].([]any), user)
+	entries = append(entries, map[string]any{"matcher": "Bash", "hooks": []any{user, entry["hooks"].([]any)[0]}})
+	doc["hooks"].(map[string]any)["PreToolUse"] = entries
+	b, _ := json.Marshal(doc)
+	os.WriteFile(c.settingsPath(), b, 0o644)
+
+	if _, err := c.Remove(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after := readFile(t, c.settingsPath())
+	if strings.Contains(after, "farero-hook") {
+		t.Fatalf("farero left:\n%s", after)
+	}
+	if n := strings.Count(after, "/usr/local/bin/audit-tool"); n != 2 {
+		t.Fatalf("user hooks kept: %d\n%s", n, after)
+	}
+}
+
+// Apply keeps settings.json's file mode.
+func TestApplyKeepsFileMode(t *testing.T) {
+	c, _ := setup(t, userSettings)
+	if err := os.Chmod(c.settingsPath(), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(c.settingsPath()); fi.Mode().Perm() != 0o640 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+}
+
+// Farero adds its hook only to its own events; the user's other events are
+// left as they are.
+func TestApplyLeavesOtherEvents(t *testing.T) {
+	const settings = `{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"/usr/local/bin/save-notes"}]}]}}`
+	c, _ := setup(t, settings)
+	if _, err := c.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after := readFile(t, c.settingsPath())
+	if n := strings.Count(after, "farero-hook"); n != len(hookEvents) {
+		t.Fatalf("%d farero entries, want %d:\n%s", n, len(hookEvents), after)
+	}
+	o := mustParse(t, after)
+	hooks, _ := o.child("hooks")
+	if raw, _ := hooks.get("PreCompact"); strings.Contains(string(raw), "farero-hook") || !strings.Contains(string(raw), "save-notes") {
+		t.Fatalf("PreCompact: %s", raw)
 	}
 }
 
