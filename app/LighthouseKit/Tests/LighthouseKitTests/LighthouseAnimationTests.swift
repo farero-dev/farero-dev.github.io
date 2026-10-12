@@ -261,6 +261,9 @@ final class LighthouseAnimationTests: XCTestCase {
             XCTAssertEqual(images.body.first?.height, side)
             return elapsed
         }
+        // 30 ms on a Mac; GitHub's macOS runners take about 36 ms for 22 pt
+        // (M6/M7 CI), so CI gets room. Rebuilding per frame would be far over.
+        let limit = ProcessInfo.processInfo.environment["CI"] == "true" ? 0.1 : 0.03
         let cold = build(.sleeping, 22, LighthouseAnimationPlan(state: .sleeping, size: 22)!)
         var report = [String(format: "first build %.1f ms", cold * 1000)]
         for size in [22.0, 48.0, 120.0] as [CGFloat] {
@@ -270,7 +273,7 @@ final class LighthouseAnimationTests: XCTestCase {
                 worst = max(worst, build(state, size, plan))
             }
             report.append(String(format: "%.0f pt worst %.1f ms", size, worst * 1000))
-            XCTAssertLessThan(worst, 0.03, "\(size) pt")
+            XCTAssertLessThan(worst, limit, "\(size) pt")
         }
         print("LighthouseLayerImages build time @2x: " + report.joined(separator: ", "))
     }
