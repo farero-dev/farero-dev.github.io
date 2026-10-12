@@ -79,7 +79,11 @@ final class AppModel {
     ///   hotkey allow|allow_session|deny  sends the shortcut's hot-key event
     ///                                    to the app, as a key press does
     private func startDebugControl(path: String) {
-        let thread = Thread { [weak self] in
+        // The model lives as long as the app. A strong capture keeps these
+        // closures Sendable; Swift 6.1 rejects sending a weak `self` (a
+        // mutable capture) from this thread to the main actor.
+        let model = self
+        let thread = Thread {
             while true {
                 // Opening a pipe blocks until a writer opens it; reading ends
                 // when that writer closes it.
@@ -91,7 +95,7 @@ final class AppModel {
                 try? handle.close()
                 for line in String(decoding: data, as: UTF8.self).split(separator: "\n") {
                     let command = String(line).trimmingCharacters(in: .whitespaces)
-                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.debugCommand(command) } }
+                    DispatchQueue.main.async { MainActor.assumeIsolated { model.debugCommand(command) } }
                 }
             }
         }
