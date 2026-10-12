@@ -1,71 +1,91 @@
 import Foundation
 
-// Per-state appearance (F-12). The lamp carries the state; the eyes carry the
-// mood. Color is never the only cue (WCAG 1.4.1): every state also differs in
-// light rhythm, eye shape, badge glyph and body gesture.
+// Per-state appearance (F-12), as drawn on the design canvas "등대 v2 (확정) ·
+// 상태 12종". The lamp carries the state; the eyes carry the mood. Color is
+// never the only cue (WCAG 1.4.1): every state also differs in light rhythm,
+// eye shape, badge shape or body gesture.
 
 /// The shape of the tower's two eyes.
 public enum LighthouseEyes: String, CaseIterable, Sendable {
-    /// Calm round eyes.
+    /// Round eyes with a highlight: the default face.
     case open
-    /// Big round eyes with a highlight: alert, asking.
+    /// Bigger round eyes: alert, asking.
     case wide
     /// Upward arcs (^ ^): happy.
     case happy
-    /// Eyes shifted up and to the side: looking up, thinking.
+    /// Round eyes raised a little: looking up, thinking.
     case lookingUp
-    /// Flat-topped, slightly slanted: focused on the work.
+    /// Half discs, flat on top: focused on the work.
     case focused
-    /// Narrow slits glancing to the side: wary.
-    case narrowSideGlance
+    /// Half discs shifted to the viewer's left: a wary side glance.
+    case sideGlance
     /// Downward arcs: asleep.
     case closed
-    /// Flat lines: shut, refusing.
-    case flat
+    /// "> <": squeezed shut, refusing.
+    case squeezed
     /// × marks: something broke.
     case crossed
-    /// Hollow rings: dim, nobody home.
-    case hollow
+    /// Small half discs: dim, nobody home.
+    case dim
 }
 
-/// A small glyph next to the lamp. Never a circle around the character.
+/// A small badge up and to the left of the lantern. Never a circle around the
+/// character.
 public enum LighthouseBadge: String, CaseIterable, Sendable {
     case none
-    /// "z": asleep.
+    /// Two "z" letters rising beside the lantern: asleep.
     case sleepZ
     /// A four-point sparkle: hello.
     case sparkle
-    /// Rising thought dots.
+    /// Three dots in a disc: thinking.
     case thoughtDots
-    /// "!": needs you.
+    /// The number of running sessions in a disc ("+" when the count is unknown).
+    case count
+    /// "!" in a disc, blinking with the lamp: needs you.
     case exclamation
-    /// A check mark: allowed.
+    /// A check mark in a disc: allowed.
     case check
-    /// A minus bar: denied.
-    case minus
+    /// An × in a disc: denied.
+    case cross
     /// A warning triangle: tainted session.
     case triangle
     /// A lightning bolt: error.
     case bolt
-    /// A slash through the lantern: no connection.
-    case slash
-    /// "+": more than one session.
-    case plus
+    /// "?" in a gray disc: no connection.
+    case question
 }
 
-/// A static body posture plus the animated hop.
-public struct LighthouseGesture: Equatable, Sendable {
-    /// Lean in degrees; positive leans right (clockwise), pivoting at the base.
-    public var leanDegrees: Double
-    /// Vertical scale of everything above the ground (1 = normal).
-    public var heightScale: Double
-    /// Whether the body hops (greeting).
-    public var hops: Bool
+/// The repeating body motion of a state.
+public enum LighthouseMotion: String, CaseIterable, Sendable {
+    /// Still.
+    case none
+    /// A slow breath: the body shrinks 1.5 % in height and back every 3.6 s.
+    case breathe
+    /// A hop of 1.4 units every second.
+    case hop
+    /// A small sideways shake, 0.4 units each way, four times a second.
+    case shake
+}
 
-    public init(leanDegrees: Double = 0, heightScale: Double = 1, hops: Bool = false) {
+/// A static body posture plus a repeating motion.
+public struct LighthouseGesture: Equatable, Sendable {
+    /// Lean in degrees around the foot of the tower; positive leans right (clockwise).
+    public var leanDegrees: Double
+    /// Horizontal scale around the foot of the tower (1 = normal).
+    public var widthScale: Double
+    /// Vertical scale around the foot of the tower (1 = normal).
+    public var heightScale: Double
+    /// The repeating motion.
+    public var motion: LighthouseMotion
+
+    public init(
+        leanDegrees: Double = 0, widthScale: Double = 1, heightScale: Double = 1,
+        motion: LighthouseMotion = .none
+    ) {
         self.leanDegrees = leanDegrees
+        self.widthScale = widthScale
         self.heightScale = heightScale
-        self.hops = hops
+        self.motion = motion
     }
 }
 
@@ -79,59 +99,54 @@ extension LighthouseState {
         case .working, .workingMany: .focused
         case .needsApproval: .wide
         case .allowed: .happy
-        case .denied: .flat
-        case .caution: .narrowSideGlance
+        case .denied: .squeezed
+        case .caution: .sideGlance
         case .waitingInput: .open
         case .error: .crossed
-        case .disconnected: .hollow
+        case .disconnected: .dim
         }
     }
 
-    /// The badge glyph for this state.
+    /// The badge for this state.
     public var badge: LighthouseBadge {
         switch self {
         case .sleeping: .sleepZ
         case .greeting: .sparkle
         case .thinking: .thoughtDots
         case .working: .none
-        case .workingMany: .plus
+        case .workingMany: .count
         case .needsApproval: .exclamation
         case .allowed: .check
-        case .denied: .minus
+        case .denied: .cross
         case .caution: .triangle
         case .waitingInput: .none
         case .error: .bolt
-        case .disconnected: .slash
+        case .disconnected: .question
         }
     }
 
     /// The body gesture for this state.
     public var gesture: LighthouseGesture {
         switch self {
-        case .sleeping: LighthouseGesture(leanDegrees: -5, heightScale: 0.96)
-        case .greeting: LighthouseGesture(hops: true)
-        case .thinking: LighthouseGesture(leanDegrees: -3)
-        case .working, .workingMany: LighthouseGesture()
-        case .needsApproval: LighthouseGesture(leanDegrees: 5)
-        case .allowed: LighthouseGesture(heightScale: 1.03)
-        case .denied: LighthouseGesture(heightScale: 0.94)
-        case .caution: LighthouseGesture(leanDegrees: -4)
-        case .waitingInput: LighthouseGesture()
-        case .error: LighthouseGesture(leanDegrees: 3)
-        case .disconnected: LighthouseGesture(leanDegrees: -2)
+        case .sleeping: LighthouseGesture(motion: .breathe)
+        case .greeting: LighthouseGesture(motion: .hop)
+        case .thinking: LighthouseGesture(motion: .breathe)
+        case .working, .workingMany: LighthouseGesture(motion: .breathe)
+        // Stretched up, eyes wide.
+        case .needsApproval: LighthouseGesture(widthScale: 0.94, heightScale: 1.06)
+        case .allowed: LighthouseGesture(motion: .hop)
+        // Shrinks and turns away.
+        case .denied: LighthouseGesture(leanDegrees: -4, widthScale: 1.05, heightScale: 0.93)
+        case .caution: LighthouseGesture(leanDegrees: 3, motion: .breathe)
+        case .waitingInput: LighthouseGesture(motion: .breathe)
+        case .error: LighthouseGesture(leanDegrees: 6, motion: .shake)
+        case .disconnected: LighthouseGesture()
         }
     }
 
-    /// Whether the body is drawn dimmed (structure gray instead of white).
+    /// Whether the body is drawn with its color drained (disconnected).
     public var isDimmed: Bool { self == .disconnected }
 
-    /// How many beams the rotating light shows: 1 for working, 2 for
-    /// workingMany, 0 for every other state.
-    public var beamCount: Int {
-        switch self {
-        case .working: 1
-        case .workingMany: 2
-        default: 0
-        }
-    }
+    /// Whether the tower shows a crack (error).
+    public var isCracked: Bool { self == .error }
 }
