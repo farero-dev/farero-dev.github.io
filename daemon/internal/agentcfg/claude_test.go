@@ -288,9 +288,38 @@ func TestVersionCompare(t *testing.T) {
 	for _, c := range []struct {
 		v    string
 		want bool
-	}{{"2.1.203", true}, {"2.1.287", true}, {"2.2.0", true}, {"3.0.0", true}, {"2.1.202", false}, {"2.0.999", false}, {"", false}} {
+	}{
+		{"2.1.203", true}, {"2.1.287", true}, {"2.2.0", true}, {"3.0.0", true}, {"2.1.202", false}, {"2.0.999", false}, {"", false},
+		// Fewer parts count the missing ones as 0; more parts are fine.
+		{"2.1", false}, {"2", false}, {"3", true}, {"2.1.203.1", true},
+		// Digits at the ends of a part are kept, 0 and 9 included.
+		{"2.1.210", true}, {"2.1.209", true}, {"2.1.290", true}, {"2.1.200", false},
+		// Non-digits around a part are dropped.
+		{"2.1.205-beta", true}, {"2.1.150-beta", false},
+	} {
 		if got := versionAtLeast(c.v, MinClaudeVersion); got != c.want {
 			t.Errorf("%q: %v", c.v, got)
+		}
+	}
+}
+
+// The version is the first word that starts with a digit and has a dot.
+func TestParseVersion(t *testing.T) {
+	for out, want := range map[string]string{
+		"2.1.287 (Claude Code)": "2.1.287",
+		"Claude Code 2.1.287":   "2.1.287",
+		"0.9.1":                 "0.9.1",
+		"9.0":                   "9.0",
+		"build 7 of 2.1.3":      "2.1.3", // 7 has no dot
+		"a.b 2.1":               "2.1",
+		"/1.2 3.4":              "3.4", // '/' sorts just below '0'
+		":1.2 3.4":              "3.4", // ':' sorts just above '9'
+		"Claude Code":           "",
+		"":                      "",
+		"  2.1.287\n":           "2.1.287",
+	} {
+		if got := parseVersion(out); got != want {
+			t.Errorf("parseVersion(%q) = %q, want %q", out, got, want)
 		}
 	}
 }
