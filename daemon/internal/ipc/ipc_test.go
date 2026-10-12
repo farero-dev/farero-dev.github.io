@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -94,5 +97,101 @@ func TestNoHTMLEscaping(t *testing.T) {
 	}
 	if bytes.Contains(line, []byte(`\u00`)) || !bytes.Contains(line, in) || !bytes.Contains(line, []byte(`"a&b"`)) {
 		t.Fatalf("line: %s", line)
+	}
+}
+
+// readOne feeds raw bytes to a Conn and returns what Read makes of them.
+func readOne(t *testing.T, payload func(w io.Writer)) (Message, error) {
+	t.Helper()
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	go func() {
+		payload(b)
+		b.Close()
+	}()
+	return NewConn(a).Read()
+}
+
+// A line of exactly MaxLine bytes is accepted, one byte more is refused.
+func TestReadLineSizeLimit(t *testing.T) {
+	const head, tail = `{"type":"t","data":"`, `"}`
+	line := func(n int) func(io.Writer) {
+		return func(w io.Writer) {
+			pad := n - len(head) - len(tail)
+			w.Write([]byte(head))
+			chunk := bytes.Repeat([]byte("x"), 1<<20)
+			for pad > 0 {
+				k := min(pad, len(chunk))
+				w.Write(chunk[:k])
+				pad -= k
+			}
+			w.Write([]byte(tail + "\n"))
+		}
+	}
+	m, err := readOne(t, line(MaxLine))
+	if err != nil || m.Type != "t" || len(m.Data) != MaxLine-len(head)-len(tail)+2 {
+		t.Fatalf("MaxLine line: type=%q data=%d err=%v", m.Type, len(m.Data), err)
+	}
+	if _, err := readOne(t, line(MaxLine+1)); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("MaxLine+1 line: err=%v", err)
+	}
+}
+
+// fakeListener replays scripted Accept errors, then blocks until closed.
+type fakeListener struct {
+	errs   []error
+	closed chan struct{}
+	once   sync.Once
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+func (l *fakeListener) Accept() (net.Conn, error) {
+	if len(l.errs) > 0 {
+		err := l.errs[0]
+		l.errs = l.errs[1:]
+		return nil, err
+	}
+	<-l.closed
+	return nil, net.ErrClosed
+}
+func (l *fakeListener) Close() error   { l.once.Do(func() { close(l.closed) }); return nil }
+func (l *fakeListener) Addr() net.Addr { return &net.UnixAddr{Name: "fake", Net: "unix"} }
+
+// Serve ends quietly when its context is cancelled, but a real Accept
+// failure on a live context is reported, and timeouts are retried.
+func TestServeStopsOnContextAndReportsAcceptErrors(t *testing.T) {
+	h := func(context.Context, *Conn, Message) {}
+	wait := func(ch chan error) error {
+		select {
+		case err := <-ch:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatal("Serve did not return")
+			return nil
+		}
+	}
+
+	// Cancelled context: nil.
+	l := &fakeListener{closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, l, h) }()
+	cancel()
+	if err := wait(done); err != nil {
+		t.Fatalf("Serve after cancel = %v, want nil", err)
+	}
+
+	// Timeouts are skipped, then a hard error is returned as is.
+	boom := errors.New("boom")
+	l = &fakeListener{errs: []error{timeoutErr{}, timeoutErr{}, boom}, closed: make(chan struct{})}
+	go func() { done <- Serve(context.Background(), l, h) }()
+	if err := wait(done); err != boom {
+		t.Fatalf("Serve = %v, want %v", err, boom)
 	}
 }
