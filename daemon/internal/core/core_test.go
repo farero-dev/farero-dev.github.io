@@ -762,6 +762,25 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/a")
 }
 
+// A log.result_limit outside 1 KB–1 MB, or not a number, falls back to the
+// default (Q46) rather than being used.
+func TestResultLimitIgnoresBadSetting(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	ctx := context.Background()
+	for _, v := range []string{"99999999", "512", "x", ""} {
+		if err := h.st.SetSetting(ctx, settingResultLimit, v); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.core.resultLimit(ctx); got != store.DefaultResultLimit {
+			t.Fatalf("setting %q: limit %d", v, got)
+		}
+	}
+	h.st.SetSetting(ctx, settingResultLimit, "4096")
+	if got := h.core.resultLimit(ctx); got != 4096 {
+		t.Fatalf("valid setting: limit %d", got)
+	}
+}
+
 // inputObject decodes a bounded input and checks it is still a JSON object
 // no larger than limit that kept its short field.
 func inputObject(t *testing.T, raw json.RawMessage, limit int, key, want string) map[string]any {

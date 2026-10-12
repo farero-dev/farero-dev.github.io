@@ -150,6 +150,18 @@ func TestTruncateUTF8(t *testing.T) {
 	if got := TruncateUTF8(s, 100); got != s {
 		t.Fatalf("got %q", got)
 	}
+	// Exactly at the limit nothing is cut (and s[limit] is out of range),
+	// and a limit of 0 or less means no limit.
+	for _, limit := range []int{len(s), 0, -1} {
+		if got := TruncateUTF8(s, limit); got != s {
+			t.Fatalf("limit %d: got %q", limit, got)
+		}
+	}
+	// A string that starts mid-rune cuts to nothing rather than walking
+	// past its start.
+	if got := TruncateUTF8("\x80\x80\x80\x80", 2); got != "" {
+		t.Fatalf("got %q", got)
+	}
 }
 
 func TestMigrationBackupAndReopen(t *testing.T) {
