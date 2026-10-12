@@ -70,7 +70,14 @@ func startHarness(t *testing.T, st *store.Store, tab *policy.Table, approvalTime
 	if err := c.StartGateway(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		// A test that fails while a gateway call waits on a card must fail
+		// now, not after the approval timeout: the HTTP server's shutdown
+		// waits for that call.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c.Shutdown(ctx)
+	})
 
 	dir, _ := os.MkdirTemp("/tmp", "frc")
 	t.Cleanup(func() { os.RemoveAll(dir) })
@@ -233,7 +240,16 @@ func (h *harness) agent(sessionID string, pid int) *agent {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.t.Cleanup(func() { cs.Close() })
+	h.t.Cleanup(func() {
+		// Close waits for calls in flight; one still waiting on a card
+		// would hold a failed test until the approval timeout.
+		done := make(chan struct{})
+		go func() { cs.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
 	h.hook(sessionID, "SessionStart", "", nil, pid)
 	return &agent{h: h, cs: cs, sid: sessionID, pid: pid}
 }
@@ -733,7 +749,9 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/a", "content": big}, 1)
 	u.answer(u.approval().ID, model.AnswerDeny)
 	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
-	if len(c.Input) > broadcastInputLimit || !strings.Contains(string(c.Input), `"file_path":"/tmp/a"`) {
+	// The bounds in these tests are literals, so raising a limit constant
+	// fails them.
+	if len(c.Input) > 8<<10 || !strings.Contains(string(c.Input), `"file_path":"/tmp/a"`) {
 		t.Fatalf("broadcast input not trimmed to a bounded JSON object: %d bytes", len(c.Input))
 	}
 	// The row keeps as much as the Q46 budget allows (16 KB by default).
@@ -742,6 +760,25 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 		t.Fatalf("stored input %d bytes, want close to %d", len(stored.Input), store.DefaultResultLimit)
 	}
 	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/a")
+}
+
+// A log.result_limit outside 1 KB–1 MB, or not a number, falls back to the
+// default (Q46) rather than being used.
+func TestResultLimitIgnoresBadSetting(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	ctx := context.Background()
+	for _, v := range []string{"99999999", "512", "x", ""} {
+		if err := h.st.SetSetting(ctx, settingResultLimit, v); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.core.resultLimit(ctx); got != store.DefaultResultLimit {
+			t.Fatalf("setting %q: limit %d", v, got)
+		}
+	}
+	h.st.SetSetting(ctx, settingResultLimit, "4096")
+	if got := h.core.resultLimit(ctx); got != 4096 {
+		t.Fatalf("valid setting: limit %d", got)
+	}
 }
 
 // inputObject decodes a bounded input and checks it is still a JSON object
@@ -766,7 +803,7 @@ func TestApprovalCardBoundsAgentInput(t *testing.T) {
 	big := strings.Repeat("나", 1<<20) // 3 MB
 	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/big", "content": big}, 1)
 	ap := u.approval()
-	m := inputObject(t, ap.Input, broadcastApprovalInput, "file_path", "/tmp/big")
+	m := inputObject(t, ap.Input, 1<<20, "file_path", "/tmp/big")
 	if c, _ := m["content"].(string); !strings.HasPrefix(c, "나나") || !strings.Contains(c, "bytes]") {
 		t.Fatalf("content not cut with a marker: %.40q", c)
 	}
@@ -775,12 +812,12 @@ func TestApprovalCardBoundsAgentInput(t *testing.T) {
 	if len(u2.snap.Approvals) != 1 {
 		t.Fatalf("snapshot: %+v", u2.snap.Approvals)
 	}
-	inputObject(t, u2.snap.Approvals[0].Input, broadcastApprovalInput, "file_path", "/tmp/big")
+	inputObject(t, u2.snap.Approvals[0].Input, 1<<20, "file_path", "/tmp/big")
 	u.answer(ap.ID, model.AnswerDeny)
 	stored := h.lastCall()
 	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/big")
 	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
-	inputObject(t, c.Input, broadcastInputLimit, "file_path", "/tmp/big")
+	inputObject(t, c.Input, 8<<10, "file_path", "/tmp/big")
 }
 
 // A plugin call with a multi-MB argument (a Resend attachment) reaches the
@@ -792,15 +829,72 @@ func TestUpstreamGetsFullPluginInput(t *testing.T) {
 	big := strings.Repeat("Zm9v", 1<<20) // 4 MB
 	ch := a.callAsync("dev_write_sim", map[string]any{"text": big, "to": "a@b.c"})
 	ap := u.approval()
-	inputObject(t, ap.Input, broadcastApprovalInput, "to", "a@b.c")
+	inputObject(t, ap.Input, 1<<20, "to", "a@b.c")
+	// Correlation matched the PreToolUse hook on the full arguments.
+	if ap.SessionID != "claude:s1" || !ap.AllowSession {
+		t.Fatalf("card not tied to the session: %q allow_session=%v", ap.SessionID, ap.AllowSession)
+	}
 	u.answer(ap.ID, model.AnswerAllow)
 	if res := <-ch; res.IsError || text(res) != "wrote: "+big {
 		t.Fatalf("upstream did not get the full input: err=%v len=%d", res.IsError, len(text(res)))
 	}
 	stored := h.lastCall()
 	inputObject(t, stored.Input, store.DefaultResultLimit, "to", "a@b.c")
-	if stored.Decision != model.DecisionUserAllowed {
+	if stored.Decision != model.DecisionUserAllowed || stored.SessionID != "claude:s1" {
 		t.Fatalf("log: %+v", stored)
+	}
+	// The 4 MB result: the row keeps the Q46 budget, call.logged 2 KB, and
+	// both carry the full size.
+	resultBytes := len("wrote: ") + len(big)
+	if len(stored.ResultText) > store.DefaultResultLimit || stored.ResultBytes != resultBytes {
+		t.Fatalf("stored result %d bytes of %d", len(stored.ResultText), stored.ResultBytes)
+	}
+	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
+	if len(c.ResultText) > 2<<10 || c.ResultBytes != resultBytes {
+		t.Fatalf("broadcast result %d bytes of %d", len(c.ResultText), c.ResultBytes)
+	}
+	inputObject(t, c.Input, 8<<10, "to", "a@b.c")
+}
+
+// A session grant for a Bash command is scoped by the whole command (Q38),
+// not by the bounded copy on the card: the same 2 MB command runs without a
+// card, and one that differs only past what the card shows still asks.
+func TestSessionGrantUsesFullAgentInput(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	cmdA := strings.Repeat("a", 2<<20)
+	cmdB := cmdA[:len(cmdA)-1] + "b"
+	bash := func(cmd string) chan ipc.HookDecision {
+		done := make(chan ipc.HookDecision, 1)
+		go func() {
+			d, _ := ipc.Decode[ipc.HookDecision](h.hook("s1", "PermissionRequest", "Bash", map[string]any{"command": cmd}, 1))
+			done <- d
+		}()
+		return done
+	}
+
+	done := bash(cmdA)
+	u.answer(u.approval().ID, model.AnswerAllowSession)
+	if d := <-done; d.Behavior != ipc.BehaviorAllow {
+		t.Fatalf("first: %+v", d)
+	}
+
+	done = bash(cmdA)
+	select {
+	case d := <-done:
+		if d.Behavior != ipc.BehaviorAllow {
+			t.Fatalf("granted command: %+v", d)
+		}
+	case <-time.After(3 * time.Second):
+		u.answer(u.approval().ID, model.AnswerDeny)
+		<-done
+		t.Fatal("the granted command asked again")
+	}
+
+	done = bash(cmdB)
+	u.answer(u.approval().ID, model.AnswerDeny)
+	if d := <-done; d.Behavior != ipc.BehaviorDeny {
+		t.Fatalf("other command: %+v", d)
 	}
 }
 
