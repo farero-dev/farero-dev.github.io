@@ -1,11 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -292,12 +295,20 @@ func TestMigrateFromV1(t *testing.T) {
 }
 
 func TestTrimJSON(t *testing.T) {
-	small := json.RawMessage(`{"a":"x"}`)
-	if got := TrimJSON(small, 100); string(got) != string(small) {
-		t.Fatalf("small input changed: %s", got)
+	// An input that fits comes back byte for byte, even right at the limit
+	// and with key order or spacing that re-encoding would change.
+	small := json.RawMessage(`{"b": 1, "a": "<x>"}`)
+	for _, limit := range []int{100, len(small)} {
+		if got := TrimJSON(small, limit); !bytes.Equal(got, small) {
+			t.Fatalf("limit %d: small input changed: %s", limit, got)
+		}
 	}
 	big := strings.Repeat("가", 5000) // 15000 bytes
-	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a.txt", "content": big, "n": 7, "list": []any{"short", big}})
+	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a.txt", "content": big, "n": 7, "list": []any{"short", big},
+		"id": int64(9007199254740993)})
+	if got := TrimJSON(raw, 0); !bytes.Equal(got, raw) {
+		t.Fatalf("limit 0 means no limit, got %d bytes", len(got))
+	}
 	got := TrimJSON(raw, 4000)
 	if len(got) > 4000 {
 		t.Fatalf("not bounded: %d", len(got))
@@ -309,9 +320,19 @@ func TestTrimJSON(t *testing.T) {
 	if m["file_path"] != "/tmp/a.txt" || m["n"] != float64(7) {
 		t.Fatalf("short fields changed: %v", m)
 	}
+	// Numbers keep every digit (2^53+1 does not survive a float64).
+	if !strings.Contains(string(got), `"id":9007199254740993`) {
+		t.Fatalf("number changed: %s", got[:80])
+	}
+	// The kept part is whole runes (a split one would come back as U+FFFD,
+	// which utf8.ValidString accepts) and the marker counts what is gone.
 	content, _ := m["content"].(string)
-	if !utf8.ValidString(content) || !strings.HasPrefix(content, "가가") || !strings.Contains(content, "bytes]") {
-		t.Fatalf("content not cut on a rune boundary with a marker: %q", content[:40])
+	cut := regexp.MustCompile(`^(.*)…\[\+(\d+) bytes\]$`).FindStringSubmatch(content)
+	if !utf8.ValidString(content) || cut == nil || !strings.HasPrefix(cut[1], "가가") || strings.Trim(cut[1], "가") != "" {
+		t.Fatalf("content not cut on a rune boundary with a marker: %.40q", content)
+	}
+	if n, _ := strconv.Atoi(cut[2]); len(cut[1])+n != len(big) {
+		t.Fatalf("marker says %s bytes gone, kept %d of %d", cut[2], len(cut[1]), len(big))
 	}
 	if l, _ := m["list"].([]any); len(l) != 2 || l[0] != "short" {
 		t.Fatalf("list changed: %v", m["list"])
@@ -337,12 +358,16 @@ func TestInsertCallBoundsInput(t *testing.T) {
 	if err != nil || len(calls) != 1 {
 		t.Fatal(err, calls)
 	}
-	if len(calls[0].Input) > MaxStoredInput {
+	// 1 MB as a literal: a larger MaxStoredInput must fail here.
+	if len(calls[0].Input) > 1<<20 {
 		t.Fatalf("stored input %d bytes", len(calls[0].Input))
 	}
 	var m map[string]any
 	if err := json.Unmarshal(calls[0].Input, &m); err != nil || m["to"] != "a@b.c" {
 		t.Fatalf("stored input: %v %v", err, m)
+	}
+	if a, _ := m["attachment"].(string); !strings.HasSuffix(a, " bytes]") {
+		t.Fatalf("attachment not cut: %d bytes", len(a))
 	}
 	// Still searchable by its short fields.
 	if hits, _ := s.QueryCalls(context.Background(), CallFilter{Query: "a@b.c"}); len(hits) != 1 {
@@ -351,11 +376,11 @@ func TestInsertCallBoundsInput(t *testing.T) {
 }
 
 // The budget is used, not just respected: a 20 KB string under a 16 KB
-// limit keeps close to 16 KB.
+// limit keeps all but a few bytes of it.
 func TestTrimJSONFillsBudget(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a", "content": strings.Repeat("x", 20000)})
 	got := TrimJSON(raw, DefaultResultLimit)
-	if len(got) > DefaultResultLimit || len(got) < DefaultResultLimit-50 {
+	if len(got) > DefaultResultLimit || len(got) < DefaultResultLimit-8 {
 		t.Fatalf("got %d bytes, limit %d", len(got), DefaultResultLimit)
 	}
 }

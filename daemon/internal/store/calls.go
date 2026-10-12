@@ -48,7 +48,8 @@ func TruncateUTF8(s string, limit int) string {
 }
 
 // TrimJSON bounds a tool input that is stored in the log or sent to the
-// app. Up to limit bytes it is returned as is. A larger input keeps its
+// app. Up to limit bytes it is returned as is; a limit of 0 or less means
+// no limit. A larger input keeps its
 // structure and loses the tails of its long string values (a Write's
 // content, an attachment's base64), each cut on a rune boundary and marked
 // with how many bytes are gone, so the result is still JSON the app decodes
