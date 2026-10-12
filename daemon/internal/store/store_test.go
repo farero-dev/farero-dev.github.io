@@ -326,15 +326,13 @@ func TestTrimJSON(t *testing.T) {
 }
 
 // A huge input (a 40 MB attachment, a Write of a whole file) must not hold
-// the write lock for seconds while the trigram index eats it.
+// the write lock for seconds while the trigram index eats it. Indexing time
+// follows the stored size, so the test checks the size: a wall-clock bound
+// failed on GitHub's runners under -race (2.8 s for 1 MB).
 func TestInsertCallBoundsInput(t *testing.T) {
 	s := newMem(t)
 	raw, _ := json.Marshal(map[string]any{"to": "a@b.c", "attachment": strings.Repeat("Zm9v", 1<<20)}) // 4 MB
-	start := time.Now()
 	addCall(t, s, "", "send_email", string(raw), "ok")
-	if d := time.Since(start); d > 2*time.Second {
-		t.Fatalf("insert took %v", d)
-	}
 	calls, err := s.QueryCalls(context.Background(), CallFilter{Limit: 1})
 	if err != nil || len(calls) != 1 {
 		t.Fatal(err, calls)
