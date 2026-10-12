@@ -96,10 +96,25 @@ func TestConnIDCarriesPID(t *testing.T) {
 		"abc":                  0,
 		"x.abc":                0,
 		"":                     0,
+		// Ids written by hand or by an older helper: PID 1 and below never
+		// count, 2 is the smallest real one.
+		"1.abc":  0,
+		"0.abc":  0,
+		"-5.abc": 0,
+		"2.abc":  2,
 	} {
 		if got := connPID(conn); got != want {
 			t.Errorf("connPID(%q) = %d, want %d", conn, got, want)
 		}
+	}
+	// An unknown PID (0, or launchd's 1) is left out of the id itself.
+	for _, pid := range []int{-1, 0, 1} {
+		if got := NewConnID(pid, "abc"); got != "abc" {
+			t.Errorf("NewConnID(%d) = %q, want the random part only", pid, got)
+		}
+	}
+	if got := NewConnID(2, "abc"); got != "2.abc" {
+		t.Errorf("NewConnID(2) = %q", got)
 	}
 	c, _ := newTest()
 	in := json.RawMessage(`{}`)
@@ -112,6 +127,39 @@ func TestConnIDCarriesPID(t *testing.T) {
 		t.Fatalf("ambiguous match without a PID must be unknown, got %q %q", sid, m)
 	}
 	if sid, m := c.Match(NewConnID(100, "x"), "dev_echo", in); sid != "claude:a" || m != ByPID {
+		t.Fatalf("got %q %q", sid, m)
+	}
+}
+
+// A hook whose agent PID was unknown (0) does not settle a tie for a
+// connection without a PID: both sides being "unknown" is not a match.
+func TestUnknownPIDDoesNotBreakTie(t *testing.T) {
+	c, _ := newTest()
+	in := json.RawMessage(`{}`)
+	c.Expect("claude:a", 0, "dev_echo", in)
+	c.Expect("claude:b", 200, "dev_echo", in)
+	if sid, m := c.Match("no-pid", "dev_echo", in); sid != "" || m != None {
+		t.Fatalf("got %q %q, want unknown session", sid, m)
+	}
+}
+
+// One agent process can hold two sessions (/clear or /resume keep the
+// process). Its calls take its entries oldest first, the same order the
+// PreToolUse hooks came in.
+func TestSameProcessOldestFirst(t *testing.T) {
+	c, _ := newTest()
+	in := json.RawMessage(`{}`)
+	c.Expect("claude:a", 100, "dev_echo", in)
+	c.Expect("claude:b", 200, "dev_echo", in)
+	c.Expect("claude:c", 100, "dev_echo", in)
+	conn := NewConnID(100, "x")
+	for _, want := range []string{"claude:a", "claude:c"} {
+		if sid, m := c.Match(conn, "dev_echo", in); sid != want || m != ByPID {
+			t.Fatalf("got %q %q, want %q by pid", sid, m, want)
+		}
+	}
+	// b is the only one left.
+	if sid, m := c.Match(conn, "dev_echo", in); sid != "claude:b" || m != ByHook {
 		t.Fatalf("got %q %q", sid, m)
 	}
 }
