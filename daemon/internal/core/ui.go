@@ -271,14 +271,23 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		return ipc.TypeSettingsGet, c.settings(ctx), nil
 
 	case ipc.TypeSettingsSet:
-		s, err := ipc.Decode[ipc.Settings](m)
+		s, err := ipc.Decode[ipc.SettingsSet](m)
 		if err != nil {
 			return "", nil, err
 		}
-		if s.ResultLimitBytes > 0 {
-			c.store.SetSetting(ctx, settingResultLimit, strconv.Itoa(s.ResultLimitBytes))
+		if n := s.ResultLimitBytes; n != nil && !validResultLimit(*n) {
+			return "", nil, fmt.Errorf("result_limit_bytes must be between %d and %d", store.MinResultLimit, store.MaxResultLimit)
 		}
-		c.store.SetSetting(ctx, settingUpdateCheck, strconv.FormatBool(s.UpdateCheck))
+		if s.ResultLimitBytes != nil {
+			if err := c.store.SetSetting(ctx, settingResultLimit, strconv.Itoa(*s.ResultLimitBytes)); err != nil {
+				return "", nil, err
+			}
+		}
+		if s.UpdateCheck != nil {
+			if err := c.store.SetSetting(ctx, settingUpdateCheck, strconv.FormatBool(*s.UpdateCheck)); err != nil {
+				return "", nil, err
+			}
+		}
 		return ipc.TypeSettingsGet, c.settings(ctx), nil
 	}
 	if h, ok := c.extraUI[m.Type]; ok {

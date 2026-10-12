@@ -11,6 +11,8 @@ final class LogSearchModel {
     private(set) var calls: [Call] = []
     private(set) var loading = false
     private(set) var message: String?
+    /// Why the last search failed; nil after one that worked.
+    private(set) var error: String?
     private(set) var canLoadMore = false
     var selection: Call.ID?
 
@@ -36,13 +38,19 @@ final class LogSearchModel {
         do {
             let q = filter.logQuery(now: .now, limit: Self.pageSize, offset: offset)
             let reply = try await app.client.request(MessageType.logQuery, q)
-            guard case .logResult(let rows) = reply.payload else { return }
+            guard case .logResult(let rows) = reply.payload else {
+                error = "예상하지 못한 응답 (\(reply.type))"
+                message = error
+                return
+            }
+            error = nil
             calls = offset == 0 ? rows : calls + rows
             canLoadMore = rows.count == Self.pageSize
             if offset == 0, !calls.contains(where: { $0.id == selection }) { selection = calls.first?.id }
             message = calls.isEmpty ? "결과 없음" : "\(calls.count)건\(canLoadMore ? " 이상" : "")"
         } catch {
-            message = error.localizedDescription
+            self.error = error.localizedDescription
+            message = self.error
         }
     }
 
@@ -58,6 +66,7 @@ struct LogSearchView: View {
     @State private var search: LogSearchModel
     @State private var deleting: Session?
     @State private var deleteError: String?
+    @State private var jumpError: String?
 
     init(model: AppModel) {
         self.model = model
@@ -126,6 +135,14 @@ struct LogSearchView: View {
                         }
                         .tag(s.id)
                         .contextMenu {
+                            Button("터미널로 이동") {
+                                Task {
+                                    // The notch's toast may be out of sight; say it here too.
+                                    if let outcome = await model.jump(to: s) { jumpError = outcome.message }
+                                }
+                            }
+                            .disabled(s.tty.isEmpty)
+                            Divider()
                             Button("세션 삭제…", role: .destructive) { deleting = s }
                         }
                     }
@@ -133,6 +150,9 @@ struct LogSearchView: View {
             }
             if let deleteError {
                 Text(deleteError).font(.caption).foregroundStyle(.red).padding(6)
+            }
+            if let jumpError {
+                Text(jumpError).font(.caption).foregroundStyle(.red).padding(6)
             }
             HStack {
                 Button {

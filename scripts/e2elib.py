@@ -873,7 +873,7 @@ def step_register(h):
 
 def wait_card(h, a, since, command):
     ev = h.wait_event("approval.request", lambda d: d.get("session_id") == a.sid and d.get("tool") == "Bash"
-                      and command in json.dumps(d.get("input")), since, 60)
+                      and command in json.dumps(d.get("input"), ensure_ascii=False), since, 60)
     if not h.check(ev, f"{a.name}: approval.request for Bash {command!r}"):
         return None, None
     ok = h.wait(lambda: dialog_open(a), 15)

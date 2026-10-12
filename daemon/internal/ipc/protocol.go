@@ -196,6 +196,13 @@ type Settings struct {
 	UpdateCheck      bool `json:"update_check"`
 }
 
+// SettingsSet is the settings.set request: the same fields as Settings,
+// each optional. An absent field keeps its value.
+type SettingsSet struct {
+	ResultLimitBytes *int  `json:"result_limit_bytes,omitempty"`
+	UpdateCheck      *bool `json:"update_check,omitempty"`
+}
+
 // AgentCfgStatus reports whether farero is registered with an agent (F-06).
 type AgentCfgStatus struct {
 	Agent          string `json:"agent"`           // "claude"

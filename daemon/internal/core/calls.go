@@ -47,7 +47,11 @@ func (c *Core) CallTool(ctx context.Context, gc gateway.Call) *mcp.CallToolResul
 		call.Error = errText
 		call.ResultText = upstream.ResultText(res)
 		call.DurationMS = time.Since(start).Milliseconds()
-		c.logCall(logCtx, call)
+		var sess *model.Session
+		if known {
+			sess = &s
+		}
+		c.logCall(logCtx, call, sess)
 		return res
 	}
 
@@ -103,6 +107,9 @@ func (c *Core) CallTool(ctx context.Context, gc gateway.Call) *mcp.CallToolResul
 	// result is returned. An unknown session is already treated as tainted.
 	if eff, ok := c.policy.Lookup(t.plugin, t.tool); ok && eff.Taint && known && !res.IsError {
 		c.sessions.MarkTainted(logCtx, sessionID)
+		// If the user deleted the session meanwhile, finish brings it back
+		// from s: tainted.
+		s.Tainted = true
 	}
 	errText := ""
 	if res.IsError {

@@ -8,6 +8,8 @@
 //	farero-devctl policy [set <plugin> <tool> [auto|ask|block]]  (no level: back to the default)
 //	farero-devctl agentcfg status|plan|apply|remove
 //	farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]
+//	farero-devctl settings [limit <bytes> | update on|off]
+//	farero-devctl session delete <session id>
 package main
 
 import (
@@ -16,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,7 +30,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg|plugin")
+		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg|plugin|settings|session")
 		os.Exit(2)
 	}
 	cmd, args := os.Args[1], os.Args[2:]
@@ -104,10 +107,57 @@ func main() {
 		printReply(conn, "a")
 	case "plugin":
 		pluginCmd(conn, args)
+	case "settings":
+		settingsCmd(conn, args)
+	case "session":
+		if len(args) != 2 || args[0] != "delete" {
+			fmt.Fprintln(os.Stderr, "usage: farero-devctl session delete <session id>")
+			os.Exit(2)
+		}
+		conn.Send(ipc.TypeSessionDelete, "s", ipc.SessionRef{SessionID: args[1]})
+		printReply(conn, "s")
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command", cmd)
 		os.Exit(2)
 	}
+}
+
+const settingsUsage = "usage: farero-devctl settings [limit <bytes> | update on|off]"
+
+// settingsCmd prints the settings, or changes one of them (settings.set
+// leaves the other as it is).
+func settingsCmd(conn *ipc.Conn, args []string) {
+	if len(args) == 0 {
+		conn.Send(ipc.TypeSettingsGet, "g", nil)
+		printReply(conn, "g")
+		return
+	}
+	if len(args) != 2 {
+		fmt.Fprintln(os.Stderr, settingsUsage)
+		os.Exit(2)
+	}
+	var req ipc.SettingsSet
+	switch args[0] {
+	case "limit":
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, settingsUsage)
+			os.Exit(2)
+		}
+		req.ResultLimitBytes = &n
+	case "update":
+		on := args[1] == "on"
+		if !on && args[1] != "off" {
+			fmt.Fprintln(os.Stderr, settingsUsage)
+			os.Exit(2)
+		}
+		req.UpdateCheck = &on
+	default:
+		fmt.Fprintln(os.Stderr, settingsUsage)
+		os.Exit(2)
+	}
+	conn.Send(ipc.TypeSettingsSet, "s", req)
+	printReply(conn, "s")
 }
 
 const pluginUsage = "usage: farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]"

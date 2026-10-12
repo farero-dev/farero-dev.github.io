@@ -286,3 +286,93 @@ func TestDeleteKeepsOpenCards(t *testing.T) {
 		t.Fatalf("all cards closed: %s", s.Status)
 	}
 }
+
+// The user can delete a session whose agent is still running; its next
+// hook event creates it again. Deleting does not clear the agent's context,
+// so a tainted session comes back tainted (Q39), also after a restart.
+func TestDeletedTaintedSessionComesBackTainted(t *testing.T) {
+	m, st, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventSessionStart, ""), "", 0)
+	m.MarkTainted(ctx, "claude:s1")
+	other := ev(EventSessionStart, "")
+	other.SessionID = "s2"
+	m.Apply(ctx, model.AgentClaude, other, "", 0)
+	for _, id := range []string{"claude:s1", "claude:s2"} {
+		if err := m.Delete(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m2, err := NewManager(ctx, st, nil) // farerod restarted meanwhile
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mgr := range []*Manager{m, m2} {
+		got, err := mgr.Apply(ctx, model.AgentClaude, ev(EventPreToolUse, "Bash"), "", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Tainted || got.Status != model.StatusRunning {
+			t.Fatalf("re-created: %+v", got)
+		}
+		other.HookEventName = EventUserPromptSubmit
+		if got, _ := mgr.Apply(ctx, model.AgentClaude, other, "", 0); got.Tainted {
+			t.Fatalf("clean session came back tainted: %+v", got)
+		}
+	}
+	if saved, _ := st.Session(ctx, "claude:s1"); !saved.Tainted {
+		t.Fatalf("stored: %+v", saved)
+	}
+	// Deleted again (now tainted in the row): still remembered.
+	if err := m.Delete(ctx, "claude:s1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := m.Apply(ctx, model.AgentClaude, ev(EventStop, ""), "", 0); !got.Tainted {
+		t.Fatalf("second re-creation: %+v", got)
+	}
+}
+
+// A call answered after its session was deleted brings the session back,
+// so the call's log row has a session to belong to.
+func TestReviveAfterDelete(t *testing.T) {
+	m, st, updates := newManager(t)
+	ctx := context.Background()
+	prev, _ := m.Apply(ctx, model.AgentClaude, ev(EventPermissionRequest, "Bash"), "ttys007", 4242)
+	m.MarkTainted(ctx, "claude:s1") // after the snapshot: the tombstone carries it
+	if err := m.Delete(ctx, "claude:s1"); err != nil {
+		t.Fatal(err)
+	}
+	n := len(*updates)
+	if err := m.Revive(ctx, prev); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := m.Get("claude:s1")
+	if !ok || !got.Tainted || got.Cwd != prev.Cwd || got.TTY != "ttys007" || got.PID != 4242 ||
+		got.Status != model.StatusRunning || got.Agent != model.AgentClaude || got.AgentSessionID != "s1" {
+		t.Fatalf("revived: %+v", got)
+	}
+	if len(*updates) != n+1 || (*updates)[n].ID != "claude:s1" {
+		t.Fatalf("revive not published: %+v", (*updates)[n:])
+	}
+	if saved, err := st.Session(ctx, "claude:s1"); err != nil || !saved.Tainted {
+		t.Fatalf("stored: %+v %v", saved, err)
+	}
+	// An existing session is left alone.
+	m.Apply(ctx, model.AgentClaude, ev(EventStop, ""), "", 4242)
+	n = len(*updates)
+	m.Revive(ctx, prev)
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingInput || len(*updates) != n {
+		t.Fatalf("revive changed a live session: %+v", s)
+	}
+	// A snapshot that knew the taint is enough without a tombstone.
+	other := ev(EventSessionStart, "")
+	other.SessionID = "s2"
+	snap, _ := m.Apply(ctx, model.AgentClaude, other, "", 0)
+	m.Delete(ctx, "claude:s2")
+	snap.Tainted = true
+	m.Revive(ctx, snap)
+	if s, _ := m.Get("claude:s2"); !s.Tainted {
+		t.Fatalf("taint from snapshot lost: %+v", s)
+	}
+}
