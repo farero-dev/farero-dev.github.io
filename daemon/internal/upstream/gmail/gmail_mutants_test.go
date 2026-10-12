@@ -119,3 +119,29 @@ func TestPadBase64(t *testing.T) {
 		}
 	}
 }
+
+// upstreamTruncate cuts to at most n bytes without splitting a rune, and
+// never walks past either end of the string. Its caller only cuts bodies
+// longer than n, so n > len(s) is not an input.
+func TestUpstreamTruncate(t *testing.T) {
+	for _, tc := range []struct {
+		s    string
+		n    int
+		want string
+	}{
+		{"hello", 3, "hel"},
+		{"hi", 2, "hi"}, // exactly the length: s[n] would be out of range
+		{"hi", 0, ""},
+		{"가나다", 3, "가"}, // 3 bytes per rune
+		{"가나다", 4, "가"}, // backs off a cut inside 나
+		{"가나다", 5, "가"},
+		{"가나다", 6, "가나"},
+		{"a가", 2, "a"},
+		// Only continuation bytes: stops at 0 instead of indexing s[-1].
+		{"\x80\x80\x80", 2, ""},
+	} {
+		if got := upstreamTruncate(tc.s, tc.n); got != tc.want {
+			t.Errorf("upstreamTruncate(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
+		}
+	}
+}
