@@ -8,6 +8,8 @@ import (
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
 	"github.com/farero-dev/farero/daemon/internal/model"
+	"github.com/farero-dev/farero/daemon/internal/policy"
+	"github.com/farero-dev/farero/daemon/internal/session"
 	"github.com/farero-dev/farero/daemon/internal/store"
 )
 
@@ -287,5 +289,44 @@ func TestEarlierToolUseKeepsCard(t *testing.T) {
 	u.answer(ap.ID, model.AnswerAllow)
 	if d, _ := ipc.Decode[ipc.HookDecision](<-done); d.Behavior != ipc.BehaviorAllow {
 		t.Fatalf("decision: %+v", d)
+	}
+}
+
+// The user answered in the terminal while the card was open, and the app's
+// answer arrived after that. Only "allow for this session" still becomes a
+// session grant; allowing once or denying never does, so a late deny in the
+// app cannot turn into a grant for the rest of the session.
+func TestLateAppAnswerGrantsOnlyAllowSession(t *testing.T) {
+	for _, tc := range []struct {
+		answer  string
+		granted bool
+	}{
+		{model.AnswerAllowSession, true},
+		{model.AnswerAllow, false},
+		{model.AnswerDeny, false},
+	} {
+		t.Run(tc.answer, func(t *testing.T) {
+			h := newHarness(t, time.Minute)
+			u := h.ui()
+			h.hook("s1", "SessionStart", "", nil, 100)
+			s, _ := h.core.sessions.Get("claude:s1")
+			input := json.RawMessage(`{"command":"make deploy"}`)
+			in := session.HookInput{SessionID: "s1", HookEventName: "PermissionRequest", ToolName: "Bash", ToolInput: input}
+			w := &agentWait{}
+			w.settled.Store(true) // the terminal answered first
+			done := make(chan ipc.HookDecision, 1)
+			go func() { done <- h.core.decideAgentTool(context.Background(), s, in, w) }()
+			u.answer(u.approval().ID, tc.answer)
+			if d := <-done; d.Behavior != ipc.BehaviorNone {
+				t.Fatalf("decision: %+v", d)
+			}
+			if c := h.lastCall(); c.Decision != model.DecisionCancelled || c.Reason != model.ReasonAnsweredInAgent {
+				t.Fatalf("log: %+v", c)
+			}
+			d := h.core.policy.DecideAgent(policy.AgentCall{SessionID: s.ID, Tool: "Bash", Input: input, UIConnected: true})
+			if granted := d.Outcome == policy.Run; granted != tc.granted {
+				t.Fatalf("granted = %v, want %v (%+v)", granted, tc.granted, d)
+			}
+		})
 	}
 }
