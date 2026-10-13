@@ -9,6 +9,7 @@ import (
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
 	"github.com/farero-dev/farero/daemon/internal/model"
+	"github.com/farero-dev/farero/daemon/internal/store"
 	"github.com/farero-dev/farero/daemon/internal/upstream"
 	"github.com/farero-dev/farero/daemon/internal/upstream/devplugin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -141,5 +142,25 @@ func TestTaintLandsOnDeletedSession(t *testing.T) {
 	}
 	if s, ok := h.core.sessions.Get("claude:s1"); !ok || !s.Tainted {
 		t.Fatalf("revived session: %+v ok=%v", s, ok)
+	}
+}
+
+func TestLogDeleteUnknown(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	a := h.agent("s1", 100)
+	a.call("dev_echo", map[string]any{"text": "x"})
+	ctx := context.Background()
+	if _, err := h.st.InsertCall(ctx, model.Call{TS: time.Now(), Kind: model.KindPlugin, Plugin: "dev",
+		Tool: "orphan", Input: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	u := h.ui()
+	u.conn.Send(ipc.TypeLogDeleteUnknown, "du", nil)
+	if m := u.reply("du"); m.Type != ipc.TypeOK {
+		t.Fatalf("reply: %s %s", m.Type, m.Data)
+	}
+	calls, _ := h.st.QueryCalls(ctx, store.CallFilter{})
+	if len(calls) != 1 || calls[0].SessionID != "claude:s1" {
+		t.Fatalf("calls: %+v", calls)
 	}
 }

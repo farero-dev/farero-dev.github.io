@@ -647,3 +647,14 @@ func TestWatchAnswer(t *testing.T) {
 		noMore(t, got)
 	}
 }
+
+func TestLogDeleteUnknown(t *testing.T) {
+	got := fakeDaemon(t, func(c *ipc.Conn) { reply(c, ipc.TypeOK, "u", nil) })
+	if code, out, _ := runCtl("log", "delete-unknown"); code != 0 || !strings.HasPrefix(out, "ok\n") {
+		t.Fatalf("%d %q", code, out)
+	}
+	m := request(t, got)
+	if m.Type != ipc.TypeLogDeleteUnknown || m.ID != "u" || len(m.Data) != 0 && string(m.Data) != "null" {
+		t.Fatalf("%+v", m)
+	}
+}

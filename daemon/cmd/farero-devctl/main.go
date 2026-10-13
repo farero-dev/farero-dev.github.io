@@ -99,6 +99,10 @@ func run(args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	case "log":
 		fs := flag.NewFlagSet("log", flag.ContinueOnError)
 		fs.SetOutput(stderr)
+		if len(args) == 1 && args[0] == "delete-unknown" {
+			conn.Send(ipc.TypeLogDeleteUnknown, "u", nil)
+			return d.printReply(conn, "u")
+		}
 		q := fs.String("q", "", "search text")
 		n := fs.Int("n", 20, "rows")
 		if code, done := parseFlags(fs, args); done {

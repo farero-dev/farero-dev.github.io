@@ -513,3 +513,30 @@ func TestFailedMigrationRollsBack(t *testing.T) {
 		t.Fatalf("session lost: %v", err)
 	}
 }
+
+func TestDeleteUnknownCalls(t *testing.T) {
+	s := newMem(t)
+	ctx := context.Background()
+	a := addSession(t, s, "keep")
+	addCall(t, s, a.ID, "kept_tool", `{"k":"keep-marker-zzz"}`, "ok")
+	addCall(t, s, "", "orphan_tool", `{"k":"orphan-marker-zzz"}`, "ok")
+	addCall(t, s, "", "orphan_two", `{}`, "orphan-result-zzz")
+	n, err := s.DeleteUnknownCalls(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if got, _ := s.QueryCalls(ctx, CallFilter{}); len(got) != 1 || got[0].Tool != "kept_tool" {
+		t.Fatalf("left: %+v", got)
+	}
+	for _, q := range []string{"orphan-marker-zzz", "orphan-result-zzz"} {
+		if got, _ := s.QueryCalls(ctx, CallFilter{Query: q}); len(got) != 0 {
+			t.Fatalf("%q still found: %+v", q, got)
+		}
+	}
+	if got, _ := s.QueryCalls(ctx, CallFilter{Query: "keep-marker-zzz"}); len(got) != 1 {
+		t.Fatalf("session row lost from search: %+v", got)
+	}
+	if n, err := s.DeleteUnknownCalls(ctx); err != nil || n != 0 {
+		t.Fatalf("second run n=%d err=%v", n, err)
+	}
+}

@@ -259,6 +259,17 @@ extension AppModel {
         }
     }
 
+    /// Deletes the log rows that belong to no session. Returns an error
+    /// message on failure.
+    func deleteUnknownLog() async -> String? {
+        do {
+            try await client.request(MessageType.logDeleteUnknown)
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     func debugLog(_ text: String) {
         guard ProcessInfo.processInfo.environment["FARERO_DEBUG"] == "1" else { return }
         FileHandle.standardError.write(Data("farero: \(text)\n".utf8))

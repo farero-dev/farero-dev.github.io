@@ -66,6 +66,7 @@ struct LogSearchView: View {
     @State private var search: LogSearchModel
     @State private var deleting: Session?
     @State private var deleteError: String?
+    @State private var confirmingUnknown = false
     @State private var jumpError: String?
 
     init(model: AppModel) {
@@ -109,6 +110,17 @@ struct LogSearchView: View {
             Button("취소", role: .cancel) {}
         } message: { s in
             Text("\(SessionDisplay.name(s, now: .now))의 훅 기록과 도구 호출 로그가 모두 지워집니다. 되돌릴 수 없습니다.")
+        }
+        .alert("세션 불명 기록을 지웁니다", isPresented: $confirmingUnknown) {
+            Button("지우기", role: .destructive) {
+                Task {
+                    deleteError = await model.deleteUnknownLog()
+                    if deleteError == nil { await search.search() }
+                }
+            }
+            Button("취소", role: .cancel) {}
+        } message: {
+            Text("세션에 연결하지 못한 도구 호출 로그가 모두 지워집니다. 되돌릴 수 없습니다.")
         }
     }
 
@@ -162,6 +174,12 @@ struct LogSearchView: View {
                 }
                 .disabled(search.filter.sessionID.isEmpty)
                 Spacer()
+                Button {
+                    confirmingUnknown = true
+                } label: {
+                    Label("세션 불명 기록 지우기", systemImage: "trash.slash")
+                }
+                .disabled(!model.state.isConnected)
             }
             .padding(8)
         }

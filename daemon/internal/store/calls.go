@@ -148,6 +148,18 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	return res.LastInsertId()
 }
 
+// DeleteUnknownCalls removes the audit log rows that were never tied to a
+// session (session_id NULL, "unknown session"). They belong to no session,
+// so DeleteSession's cascade never reaches them. The calls_ad trigger keeps
+// the FTS index in step. It returns how many rows were removed.
+func (s *Store) DeleteUnknownCalls(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM calls WHERE session_id IS NULL`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // SetCallDecision rewrites a row's decision and reason, for a decision that
 // turned out not to be the one the agent followed.
 func (s *Store) SetCallDecision(ctx context.Context, id int64, decision, reason string) error {
