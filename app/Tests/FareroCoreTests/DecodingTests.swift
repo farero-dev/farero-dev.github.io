@@ -300,6 +300,13 @@ struct EncodingTests {
         #expect(o.count == 2)
     }
 
+    @Test func logDeleteUnknownHasNoData() throws {
+        let o = try object(OutgoingMessage.line(type: MessageType.logDeleteUnknown, id: "r4"))
+        #expect(o["type"] as? String == "log.delete_unknown")
+        #expect(o["data"] == nil)
+        #expect(o.count == 2)
+    }
+
     @Test func logQueryOmitsEmptyFields() throws {
         var q = LogQuery(query: "배포", limit: 20)
         q.from = Date(timeIntervalSince1970: 1_790_901_697)

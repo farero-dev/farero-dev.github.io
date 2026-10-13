@@ -15,6 +15,7 @@ public enum MessageType {
     public static let pluginPrompt = "plugin.prompt"
     public static let logQuery = "log.query"
     public static let logResult = "log.result"
+    public static let logDeleteUnknown = "log.delete_unknown"
     public static let policyGet = "policy.get"
     public static let policySet = "policy.set"
     public static let policyState = "policy.state"

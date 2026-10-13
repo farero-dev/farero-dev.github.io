@@ -136,6 +136,14 @@ func (c *Core) handleUI(ctx context.Context, m ipc.Message) (string, any, error)
 		}
 		return ipc.TypeLogResult, calls, nil
 
+	case ipc.TypeLogDeleteUnknown:
+		// The app re-queries after the ok reply; there is no broadcast for
+		// log changes to other apps.
+		if _, err := c.store.DeleteUnknownCalls(ctx); err != nil {
+			return "", nil, err
+		}
+		return ipc.TypeOK, nil, nil
+
 	case ipc.TypePolicyGet:
 		return ipc.TypePolicyState, c.policy.Tools(), nil
 
