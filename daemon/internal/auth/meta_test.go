@@ -233,3 +233,19 @@ func TestRefreshErrors(t *testing.T) {
 		}
 	}
 }
+
+// The app shows the browser link with its deadline: ten minutes, the time
+// the loopback listener waits.
+func TestLoopbackPromptExpiresInTenMinutes(t *testing.T) {
+	cfg := &oauth2.Config{ClientID: "c", Endpoint: oauth2.Endpoint{AuthURL: "https://a/authorize", TokenURL: "https://a/token"}}
+	var expires time.Time
+	start := time.Now()
+	LoopbackFlow(context.Background(), cfg, "/callback", func(p Prompt) {
+		expires = p.ExpiresAt
+		u, _ := url.Parse(p.URL)
+		go http.Get(u.Query().Get("redirect_uri") + "?error=access_denied&state=" + url.QueryEscape(u.Query().Get("state")))
+	})
+	if d := expires.Sub(start); d < 10*time.Minute-time.Second || d > 10*time.Minute+time.Second {
+		t.Fatalf("expires in %v", d)
+	}
+}

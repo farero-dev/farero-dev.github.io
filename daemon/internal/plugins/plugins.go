@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,6 +20,17 @@ import (
 	"github.com/farero-dev/farero/daemon/internal/secret"
 	"github.com/farero-dev/farero/daemon/internal/store"
 	"github.com/farero-dev/farero/daemon/internal/upstream"
+)
+
+// The network-facing steps the connectors use. They default to the real
+// implementations; tests replace them so no flow touches the network.
+var (
+	deviceFlow        = auth.DeviceFlow
+	loopbackFlow      = auth.LoopbackFlow
+	fetchResourceMeta = auth.FetchResourceMeta
+	fetchServerMeta   = auth.FetchServerMeta
+	// httpClient sends the plain API calls (client registration, GitHub login).
+	httpClient = http.DefaultClient
 )
 
 // Env is what the services need from farerod.

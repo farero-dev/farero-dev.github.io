@@ -7,12 +7,15 @@
 package policy
 
 import (
+	"cmp"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/farero-dev/farero/daemon/internal/model"
@@ -251,11 +254,8 @@ func (e *Engine) Tools() []ToolInfo {
 			out = append(out, ToolInfo{Plugin: p, Tool: name, Effective: eff})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Plugin != out[j].Plugin {
-			return out[i].Plugin < out[j].Plugin
-		}
-		return out[i].Tool < out[j].Tool
+	slices.SortFunc(out, func(a, b ToolInfo) int {
+		return cmp.Or(strings.Compare(a.Plugin, b.Plugin), strings.Compare(a.Tool, b.Tool))
 	})
 	return out
 }

@@ -524,3 +524,38 @@ func TestDeleteUsesTaintInMemory(t *testing.T) {
 		t.Fatalf("tombstones: %v", got)
 	}
 }
+
+// TurnStopped puts a running turn back to waiting for input and clears its
+// tool; an ended session, or one already waiting with no tool, is left
+// alone and the app is not told again.
+func TestTurnStopped(t *testing.T) {
+	m, _, updates := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventPreToolUse, "Bash"), "", 0)
+	n := len(*updates)
+	m.TurnStopped(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingInput || s.CurrentTool != "" || len(*updates) != n+1 {
+		t.Fatalf("running: %s/%q, %d updates", s.Status, s.CurrentTool, len(*updates)-n)
+	}
+	m.TurnStopped(ctx, "claude:s1")
+	if len(*updates) != n+1 {
+		t.Fatal("already waiting: told again")
+	}
+	m.Apply(ctx, model.AgentClaude, ev(EventSessionEnd, ""), "", 0)
+	m.TurnStopped(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusEnded {
+		t.Fatalf("ended: %s", s.Status)
+	}
+}
+
+// A turn that runs without a tool (the model is thinking) also goes back
+// to waiting for input when the user stops it.
+func TestTurnStoppedWithoutTool(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventUserPromptSubmit, ""), "", 0)
+	m.TurnStopped(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingInput {
+		t.Fatalf("status: %s", s.Status)
+	}
+}

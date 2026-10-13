@@ -74,7 +74,7 @@ func logRequests(log *slog.Logger) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			attrs := []any{"method", method}
-			if p, ok := req.GetParams().(*mcp.InitializeParams); ok && p != nil {
+			if p, _ := req.GetParams().(*mcp.InitializeParams); p != nil {
 				attrs = append(attrs, "protocol", p.ProtocolVersion)
 				if p.ClientInfo != nil {
 					attrs = append(attrs, "client", p.ClientInfo.Name+" "+p.ClientInfo.Version)
@@ -114,11 +114,10 @@ func (g *Gateway) SetTools(tools []*mcp.Tool) {
 			remove = append(remove, name)
 		}
 	}
-	if len(remove) > 0 {
-		g.server.RemoveTools(remove...)
-		for _, n := range remove {
-			delete(g.tools, n)
-		}
+	// RemoveTools notifies clients only when something was removed.
+	g.server.RemoveTools(remove...)
+	for _, n := range remove {
+		delete(g.tools, n)
 	}
 	for name, t := range want {
 		sig, _ := json.Marshal(t)
@@ -142,8 +141,8 @@ func (g *Gateway) addTool(t *mcp.Tool) (err error) {
 	name := t.Name
 	g.server.AddTool(t, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		conn := ""
-		if req.Extra != nil && req.Extra.Header != nil {
-			conn = req.Extra.Header.Get(ConnHeader)
+		if req.Extra != nil {
+			conn = req.Extra.Header.Get(ConnHeader) // "" for a nil Header
 		}
 		var args json.RawMessage
 		if req.Params != nil {

@@ -41,6 +41,7 @@ const (
 	TypePluginUpdated     = "plugin.updated"
 	TypeLogQuery          = "log.query"
 	TypeLogResult         = "log.result"
+	TypeLogDeleteUnknown  = "log.delete_unknown" // no data; deletes log rows with no session
 	TypePolicyGet         = "policy.get"
 	TypePolicySet         = "policy.set"
 	TypePolicyState       = "policy.state"

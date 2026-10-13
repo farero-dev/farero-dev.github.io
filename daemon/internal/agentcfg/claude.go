@@ -753,7 +753,8 @@ func contains(list []string, s string) bool {
 // parseVersion extracts "2.1.287" from "2.1.287 (Claude Code)".
 func parseVersion(out string) string {
 	for _, f := range strings.Fields(out) {
-		if len(f) > 0 && f[0] >= '0' && f[0] <= '9' && strings.Count(f, ".") >= 1 {
+		// Fields are never empty.
+		if f[0] >= '0' && f[0] <= '9' && strings.Count(f, ".") >= 1 {
 			return f
 		}
 	}

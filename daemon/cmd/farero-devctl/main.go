@@ -14,8 +14,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -29,36 +31,55 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg|plugin|settings|session")
-		os.Exit(2)
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+// devctl carries the output streams and the browser opener so tests can
+// run every subcommand in process.
+type devctl struct {
+	out, errw io.Writer
+	open      func(url string)
+}
+
+// openURL opens a URL with the macOS open command; tests replace it.
+var openURL = func(url string) { exec.Command("open", url).Run() }
+
+// run executes one farero-devctl invocation and returns its exit code.
+func run(args []string, _ io.Reader, stdout, stderr io.Writer) int {
+	d := &devctl{out: stdout, errw: stderr, open: openURL}
+	if len(args) < 1 {
+		fmt.Fprintln(stderr, "usage: farero-devctl watch|answer|log|policy|agentcfg|plugin|settings|session")
+		return 2
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, args := args[0], args[1:]
 	conn, err := ipc.Dial(paths.Socket(), time.Second)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "farerod not reachable:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "farerod not reachable:", err)
+		return 1
 	}
 	defer conn.Close()
 	conn.Send(ipc.TypeUIHello, "hello", ipc.UIHello{Version: "devctl"})
 	snap, err := conn.Read()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 	switch cmd {
 	case "watch":
-		fs := flag.NewFlagSet("watch", flag.ExitOnError)
+		fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+		fs.SetOutput(stderr)
 		answer := fs.String("answer", "", "answer approvals automatically")
-		fs.Parse(args)
-		fmt.Println(line(snap))
+		if code, done := parseFlags(fs, args); done {
+			return code
+		}
+		fmt.Fprintln(stdout, line(snap))
 		for {
 			m, err := conn.Read()
 			if err != nil {
-				fmt.Fprintln(os.Stderr, "disconnected:", err)
-				return
+				fmt.Fprintln(stderr, "disconnected:", err)
+				return 0
 			}
-			fmt.Println(line(m))
+			fmt.Fprintln(stdout, line(m))
 			if m.Type == ipc.TypeApprovalRequest && *answer != "" {
 				a, _ := ipc.Decode[model.Approval](m)
 				ans := *answer
@@ -70,107 +91,124 @@ func main() {
 		}
 	case "answer":
 		if len(args) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: farero-devctl answer <approval id> allow|allow_session|deny")
-			os.Exit(2)
+			fmt.Fprintln(stderr, "usage: farero-devctl answer <approval id> allow|allow_session|deny")
+			return 2
 		}
 		conn.Send(ipc.TypeApprovalResponse, "r", ipc.ApprovalResponse{ApprovalID: args[0], Answer: args[1]})
-		printReply(conn, "r")
+		return d.printReply(conn, "r")
 	case "log":
-		fs := flag.NewFlagSet("log", flag.ExitOnError)
+		fs := flag.NewFlagSet("log", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		if len(args) == 1 && args[0] == "delete-unknown" {
+			conn.Send(ipc.TypeLogDeleteUnknown, "u", nil)
+			return d.printReply(conn, "u")
+		}
 		q := fs.String("q", "", "search text")
 		n := fs.Int("n", 20, "rows")
-		fs.Parse(args)
+		if code, done := parseFlags(fs, args); done {
+			return code
+		}
 		conn.Send(ipc.TypeLogQuery, "q", store.CallFilter{Query: *q, Limit: *n})
-		printReply(conn, "q")
+		return d.printReply(conn, "q")
 	case "policy":
 		if len(args) == 0 {
 			conn.Send(ipc.TypePolicyGet, "p", nil)
-			printReply(conn, "p")
-			break
+			return d.printReply(conn, "p")
 		}
 		if args[0] != "set" || len(args) < 3 || len(args) > 4 {
-			fmt.Fprintln(os.Stderr, "usage: farero-devctl policy [set <plugin> <tool> [auto|ask|block]]")
-			os.Exit(2)
+			fmt.Fprintln(stderr, "usage: farero-devctl policy [set <plugin> <tool> [auto|ask|block]]")
+			return 2
 		}
 		level := ""
 		if len(args) == 4 {
 			level = args[3]
 		}
 		conn.Send(ipc.TypePolicySet, "p", ipc.PolicySet{Plugin: args[1], Tool: args[2], Level: level})
-		printReply(conn, "p")
+		return d.printReply(conn, "p")
 	case "agentcfg":
 		op := "status"
 		if len(args) > 0 {
 			op = args[0]
 		}
 		conn.Send("agentcfg."+op, "a", ipc.AgentRef{Agent: "claude"})
-		printReply(conn, "a")
+		return d.printReply(conn, "a")
 	case "plugin":
-		pluginCmd(conn, args)
+		return d.pluginCmd(conn, args)
 	case "settings":
-		settingsCmd(conn, args)
+		return d.settingsCmd(conn, args)
 	case "session":
 		if len(args) != 2 || args[0] != "delete" {
-			fmt.Fprintln(os.Stderr, "usage: farero-devctl session delete <session id>")
-			os.Exit(2)
+			fmt.Fprintln(stderr, "usage: farero-devctl session delete <session id>")
+			return 2
 		}
 		conn.Send(ipc.TypeSessionDelete, "s", ipc.SessionRef{SessionID: args[1]})
-		printReply(conn, "s")
+		return d.printReply(conn, "s")
 	default:
-		fmt.Fprintln(os.Stderr, "unknown command", cmd)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "unknown command", cmd)
+		return 2
 	}
+}
+
+// parseFlags parses a subcommand's flags like flag.ExitOnError did: done
+// is true when the command must stop with code (0 for -h, 2 otherwise).
+func parseFlags(fs *flag.FlagSet, args []string) (code int, done bool) {
+	err := fs.Parse(args)
+	if err == nil {
+		return 0, false
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		return 0, true
+	}
+	return 2, true
 }
 
 const settingsUsage = "usage: farero-devctl settings [limit <bytes> | update on|off]"
 
 // settingsCmd prints the settings, or changes one of them (settings.set
 // leaves the other as it is).
-func settingsCmd(conn *ipc.Conn, args []string) {
+func (d *devctl) settingsCmd(conn *ipc.Conn, args []string) int {
 	if len(args) == 0 {
 		conn.Send(ipc.TypeSettingsGet, "g", nil)
-		printReply(conn, "g")
-		return
+		return d.printReply(conn, "g")
 	}
 	if len(args) != 2 {
-		fmt.Fprintln(os.Stderr, settingsUsage)
-		os.Exit(2)
+		fmt.Fprintln(d.errw, settingsUsage)
+		return 2
 	}
 	var req ipc.SettingsSet
 	switch args[0] {
 	case "limit":
 		n, err := strconv.Atoi(args[1])
 		if err != nil {
-			fmt.Fprintln(os.Stderr, settingsUsage)
-			os.Exit(2)
+			fmt.Fprintln(d.errw, settingsUsage)
+			return 2
 		}
 		req.ResultLimitBytes = &n
 	case "update":
 		on := args[1] == "on"
 		if !on && args[1] != "off" {
-			fmt.Fprintln(os.Stderr, settingsUsage)
-			os.Exit(2)
+			fmt.Fprintln(d.errw, settingsUsage)
+			return 2
 		}
 		req.UpdateCheck = &on
 	default:
-		fmt.Fprintln(os.Stderr, settingsUsage)
-		os.Exit(2)
+		fmt.Fprintln(d.errw, settingsUsage)
+		return 2
 	}
 	conn.Send(ipc.TypeSettingsSet, "s", req)
-	printReply(conn, "s")
+	return d.printReply(conn, "s")
 }
 
 const pluginUsage = "usage: farero-devctl plugin [connect <plugin> [key=value…] | disconnect <plugin> | option <plugin> <key> <value> | tools <plugin>]"
 
-func pluginCmd(conn *ipc.Conn, args []string) {
+func (d *devctl) pluginCmd(conn *ipc.Conn, args []string) int {
 	if len(args) == 0 {
 		conn.Send(ipc.TypePluginList, "l", nil)
-		printReply(conn, "l")
-		return
+		return d.printReply(conn, "l")
 	}
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, pluginUsage)
-		os.Exit(2)
+		fmt.Fprintln(d.errw, pluginUsage)
+		return 2
 	}
 	op, name := args[0], args[1]
 	switch op {
@@ -179,46 +217,46 @@ func pluginCmd(conn *ipc.Conn, args []string) {
 		for _, kv := range args[2:] {
 			k, v, ok := strings.Cut(kv, "=")
 			if !ok {
-				fmt.Fprintln(os.Stderr, pluginUsage)
-				os.Exit(2)
+				fmt.Fprintln(d.errw, pluginUsage)
+				return 2
 			}
 			params[k] = v
 		}
 		conn.Send(ipc.TypePluginConnect, "c", ipc.PluginConnect{Plugin: name, Params: params})
-		os.Exit(waitConnect(conn, name))
+		return d.waitConnect(conn, name)
 	case "disconnect":
 		conn.Send(ipc.TypePluginDisconnect, "d", ipc.PluginRef{Plugin: name})
-		printReply(conn, "d")
+		return d.printReply(conn, "d")
 	case "option":
 		if len(args) != 4 {
-			fmt.Fprintln(os.Stderr, pluginUsage)
-			os.Exit(2)
+			fmt.Fprintln(d.errw, pluginUsage)
+			return 2
 		}
 		conn.Send(ipc.TypePluginSetOption, "o", ipc.PluginSetOption{Plugin: name, Key: args[2], Value: args[3]})
-		printReply(conn, "o")
+		return d.printReply(conn, "o")
 	case "tools":
 		conn.Send(ipc.TypePluginTools, "t", ipc.PluginRef{Plugin: name})
-		printReply(conn, "t")
+		return d.printReply(conn, "t")
 	default:
-		fmt.Fprintln(os.Stderr, pluginUsage)
-		os.Exit(2)
+		fmt.Fprintln(d.errw, pluginUsage)
+		return 2
 	}
 }
 
 // waitConnect follows a plugin.connect like the app's plugin window: it
 // prints the device code or authorization URL, opens the URL in the
 // browser, and returns once the plugin is connected (0) or failed (1).
-func waitConnect(conn *ipc.Conn, plugin string) int {
+func (d *devctl) waitConnect(conn *ipc.Conn, plugin string) int {
 	for {
 		m, err := conn.Read()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(d.errw, err)
 			return 1
 		}
 		switch m.Type {
 		case ipc.TypeError:
 			if m.ID == "c" {
-				fmt.Fprintln(os.Stderr, string(m.Data))
+				fmt.Fprintln(d.errw, string(m.Data))
 				return 1
 			}
 		case ipc.TypePluginPrompt:
@@ -227,16 +265,16 @@ func waitConnect(conn *ipc.Conn, plugin string) int {
 				continue
 			}
 			if p.UserCode != "" {
-				fmt.Println("code:", p.UserCode)
+				fmt.Fprintln(d.out, "code:", p.UserCode)
 			}
-			fmt.Println("open:", p.URL)
-			exec.Command("open", p.URL).Run()
+			fmt.Fprintln(d.out, "open:", p.URL)
+			d.open(p.URL)
 		case ipc.TypePluginUpdated:
 			p, _ := ipc.Decode[model.PluginState](m)
 			if p.Plugin != plugin {
 				continue
 			}
-			fmt.Println(line(m))
+			fmt.Fprintln(d.out, line(m))
 			switch p.Status {
 			case model.PluginConnected:
 				return 0
@@ -247,20 +285,20 @@ func waitConnect(conn *ipc.Conn, plugin string) int {
 	}
 }
 
-func printReply(conn *ipc.Conn, id string) {
+func (d *devctl) printReply(conn *ipc.Conn, id string) int {
 	for {
 		m, err := conn.Read()
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			fmt.Fprintln(d.errw, err)
+			return 1
 		}
 		if m.ID == id {
 			var v any
 			json.Unmarshal(m.Data, &v)
 			b, _ := json.MarshalIndent(v, "", "  ")
-			fmt.Println(m.Type)
-			fmt.Println(string(b))
-			return
+			fmt.Fprintln(d.out, m.Type)
+			fmt.Fprintln(d.out, string(b))
+			return 0
 		}
 	}
 }

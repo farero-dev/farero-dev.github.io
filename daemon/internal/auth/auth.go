@@ -290,7 +290,7 @@ func (s *savingSource) Token() (*oauth2.Token, error) {
 // given static headers.
 func HTTPClient(ts oauth2.TokenSource, headers map[string]string) *http.Client {
 	base := http.DefaultTransport
-	if len(headers) > 0 {
+	if len(headers) != 0 {
 		base = headerTransport{base: http.DefaultTransport, headers: headers}
 	}
 	return &http.Client{Transport: &oauth2.Transport{Source: ts, Base: base}}

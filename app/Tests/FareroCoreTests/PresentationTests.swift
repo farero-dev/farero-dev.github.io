@@ -26,10 +26,10 @@ struct PresentationTests {
     @Test func sessionStatusLabels() throws {
         let labels = Dictionary(uniqueKeysWithValues: SessionStatus.allCases.map { ($0, $0.label) })
         #expect(labels == [.running: "실행 중", .waitingInput: "입력 대기", .waitingApproval: "승인 대기",
-                           .ended: "종료됨", .unknown: "상태 불명"])
+                           .ended: "종료됨", .unknown: "알 수 없음"])
         // From the wire values farerod sends; anything else reads as unknown.
         for (raw, label) in [("running", "실행 중"), ("waiting_input", "입력 대기"), ("waiting_approval", "승인 대기"),
-                             ("ended", "종료됨"), ("unknown", "상태 불명"), ("paused", "상태 불명")] {
+                             ("ended", "종료됨"), ("unknown", "알 수 없음"), ("paused", "알 수 없음")] {
             let status = try JSONDecoder().decode(SessionStatus.self, from: Data("\"\(raw)\"".utf8))
             #expect(status.label == label, "\(raw)")
         }

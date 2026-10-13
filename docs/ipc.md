@@ -150,6 +150,7 @@
 |---|---|---|
 | `approval.response` | `{"approval_id","answer":"allow"\|"allow_session"\|"deny"}` | `ok` 또는 `error`(이미 끝난 카드) |
 | `log.query` | `{"query","session_id","agent","plugin","tool","decision","kind","from","to","limit","offset"}` (모두 선택. `from`/`to`는 RFC 3339 문자열이고, 비우려면 빼거나 `""`) | `log.result`: `[Call]`. `query`는 3글자 이상이면 전문 검색, 2글자 이하면 부분 일치. `limit`은 0 이하면 200, 1000을 넘으면 1000으로 줄인다 |
+| `log.delete_unknown` | 없음 | `ok`. 세션에 연결하지 못해 `session_id`가 없는 감사 로그("세션 불명")를 모두 지우고 검색 색인도 함께 정리한다. 세션이 있는 기록은 건드리지 않는다. 다른 앱에 보내는 알림은 없으므로 앱은 `ok`를 받은 뒤 검색을 다시 한다 |
 | `policy.get` | 없음 | `policy.state`: `[{"plugin","tool","level","no_session","taint","destructive","default_level","overridden"}]`. `level`은 적용 중인 단계, `default_level`은 분류표 단계다. `overridden`은 사용자가 고른 단계가 적용 중이라는 뜻이고, 분류표가 바뀌어 그 단계가 기본값과 같아져도 `true`다(아래 "정책 변경") |
 | `policy.set` | `{"plugin","tool","level":"auto"\|"ask"\|"block"\|""}` | `policy.state`. `""`나 분류표 기본값과 같은 단계는 사용자 변경을 지우고 기본값으로 되돌림. `no_session` 도구를 `auto`로 바꾸려 하면 `error` |
 | `session.delete` | `{"session_id"}` | `ok`. 세션의 훅 이벤트와 감사 로그도 지우고, 모든 앱에 `session.removed`를 보냄. 없는 세션이면 `error`(아래 "세션 삭제") |
