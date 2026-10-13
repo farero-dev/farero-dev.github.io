@@ -18,9 +18,12 @@ func processAlive(pid int, before time.Time) bool {
 	if err != nil {
 		return true // exists; start time unknown
 	}
-	tv := kp.Proc.P_starttime
-	started := time.Unix(tv.Sec, int64(tv.Usec)*1000)
-	return !started.After(before)
+	return !timevalTime(kp.Proc.P_starttime).After(before)
+}
+
+// timevalTime converts the kernel's start time (seconds and microseconds).
+func timevalTime(tv unix.Timeval) time.Time {
+	return time.Unix(tv.Sec, int64(tv.Usec)*1000)
 }
 
 // processExists reports whether pid is a running process other than

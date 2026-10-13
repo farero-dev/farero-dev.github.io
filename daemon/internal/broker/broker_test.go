@@ -220,5 +220,14 @@ func TestRespondRemovesOnlyThatRequest(t *testing.T) {
 	if len(left) != 2 || left[0].ID != p[0].ID || left[1].ID != p[2].ID {
 		t.Fatalf("after answering the middle one: %+v", left)
 	}
+	// The first one, then the last.
+	b.Respond(p[0].ID, model.AnswerDeny)
+	if left := b.Pending(); len(left) != 1 || left[0].ID != p[2].ID {
+		t.Fatalf("after answering the first one: %+v", left)
+	}
+	b.Respond(p[2].ID, model.AnswerDeny)
+	if left := b.Pending(); len(left) != 0 {
+		t.Fatalf("after answering all: %+v", left)
+	}
 	b.DetachUI()
 }

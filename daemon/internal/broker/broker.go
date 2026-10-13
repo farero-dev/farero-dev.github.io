@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -214,11 +215,8 @@ func (b *Broker) remove(id string) bool {
 
 func (b *Broker) removeLocked(id string) {
 	delete(b.pending, id)
-	for i, x := range b.order {
-		if x == id {
-			b.order = append(b.order[:i], b.order[i+1:]...)
-			break
-		}
+	if i := slices.Index(b.order, id); i >= 0 {
+		b.order = slices.Delete(b.order, i, i+1)
 	}
 }
 

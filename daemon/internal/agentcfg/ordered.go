@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // object is a JSON object that keeps its key order, so rewriting a user's
@@ -67,11 +68,8 @@ func (o *object) del(k string) {
 		return
 	}
 	delete(o.vals, k)
-	for i, x := range o.keys {
-		if x == k {
-			o.keys = append(o.keys[:i], o.keys[i+1:]...)
-			break
-		}
+	if i := slices.Index(o.keys, k); i >= 0 {
+		o.keys = slices.Delete(o.keys, i, i+1)
 	}
 }
 
