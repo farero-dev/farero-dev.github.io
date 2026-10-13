@@ -59,7 +59,10 @@ func TestHookExitsAtOnceWithoutDaemon(t *testing.T) {
 			if got := strings.TrimSpace(string(out)); got != tc.wantOut {
 				t.Errorf("stdout = %q, want %q", got, tc.wantOut)
 			}
-			if took > time.Second {
+			// Well under ackTimeout: a hook that waited for farerod would
+			// take at least that long. Starting the binary on a loaded
+			// machine (CI, parallel test runs) can take over a second.
+			if took > ackTimeout-500*time.Millisecond {
 				t.Errorf("took %v", took)
 			}
 		})

@@ -220,5 +220,31 @@ func TestRespondRemovesOnlyThatRequest(t *testing.T) {
 	if len(left) != 2 || left[0].ID != p[0].ID || left[1].ID != p[2].ID {
 		t.Fatalf("after answering the middle one: %+v", left)
 	}
+	// The first one, then the last.
+	b.Respond(p[0].ID, model.AnswerDeny)
+	if left := b.Pending(); len(left) != 1 || left[0].ID != p[2].ID {
+		t.Fatalf("after answering the first one: %+v", left)
+	}
+	b.Respond(p[2].ID, model.AnswerDeny)
+	if left := b.Pending(); len(left) != 0 {
+		t.Fatalf("after answering all: %+v", left)
+	}
 	b.DetachUI()
+}
+
+// An answer that is not allow, allow_session or deny is refused and the
+// card stays open.
+func TestRespondRejectsUnknownAnswer(t *testing.T) {
+	n := newRec()
+	b := New(n, time.Minute)
+	b.AttachUI()
+	defer b.DetachUI()
+	go b.Request(context.Background(), model.Approval{Tool: "a"})
+	a := <-n.requested
+	if err := b.Respond(a.ID, "maybe"); err == nil || err.Error() != "bad answer maybe" {
+		t.Fatalf("err = %v", err)
+	}
+	if p := b.Pending(); len(p) != 1 || p[0].ID != a.ID {
+		t.Fatalf("pending: %+v", p)
+	}
 }

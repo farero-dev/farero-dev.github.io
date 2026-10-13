@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -438,5 +440,76 @@ func TestTrimJSONFillsBudget(t *testing.T) {
 	got := TrimJSON(raw, DefaultResultLimit)
 	if len(got) > DefaultResultLimit || len(got) < DefaultResultLimit-8 {
 		t.Fatalf("got %d bytes, limit %d", len(got), DefaultResultLimit)
+	}
+}
+
+// Rows from before input_json was always JSON come back as a JSON string;
+// an empty input stays empty.
+func TestQueryCallsLegacyInput(t *testing.T) {
+	s := newMem(t)
+	ctx := context.Background()
+	for _, in := range []string{"not json", ""} {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO calls(ts, kind, agent, plugin, tool, input_json, result_text, result_bytes, decision, reason, duration_ms, error)
+VALUES(1, 'plugin', 'claude', 'github', 't', ?, '', 0, 'denied', '', 0, '')`, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	calls, err := s.QueryCalls(ctx, CallFilter{})
+	if err != nil || len(calls) != 2 {
+		t.Fatalf("%v %d", err, len(calls))
+	}
+	got := map[string]bool{}
+	for _, c := range calls {
+		got[string(c.Input)] = true
+	}
+	if !got[`"not json"`] || !got[""] {
+		t.Fatalf("inputs: %v", got)
+	}
+}
+
+// A closed database is an error, not an empty answer.
+func TestClosedStoreErrors(t *testing.T) {
+	s := newMem(t)
+	s.Close()
+	ctx := context.Background()
+	if _, err := s.Setting(ctx, "x"); err == nil {
+		t.Error("Setting")
+	}
+	if _, err := s.Sessions(ctx); err == nil {
+		t.Error("Sessions")
+	}
+}
+
+// A migration that fails is rolled back: the version stays and the data
+// the earlier migrations made is still there.
+func TestFailedMigrationRollsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "farero.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addSession(t, s, "kept")
+	s.Close()
+	old := migrations
+	migrations = append(slices.Clone(old), `CREATE TABLE extra(x); THIS IS NOT SQL;`)
+	defer func() { migrations = old }()
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("migration %d", len(old)+1)) {
+		t.Fatalf("open: %v", err)
+	}
+	migrations = old
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var v int
+	s.db.QueryRow(`PRAGMA user_version`).Scan(&v)
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'extra'`).Scan(&n)
+	if v != len(old) || n != 0 {
+		t.Fatalf("version %d, extra table %d", v, n)
+	}
+	if _, err := s.Session(context.Background(), "claude:kept"); err != nil {
+		t.Fatalf("session lost: %v", err)
 	}
 }

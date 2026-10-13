@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
@@ -36,7 +37,7 @@ func (c *Core) snapshot(ctx context.Context) ipc.StateSnapshot {
 func (c *Core) pluginStates(ctx context.Context) []model.PluginState {
 	names := append([]string(nil), KnownPlugins...)
 	for name := range c.connectors {
-		if !contains(names, name) {
+		if !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -59,15 +60,6 @@ func (c *Core) pluginStates(ctx context.Context) []model.PluginState {
 		out = append(out, p)
 	}
 	return out
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Core) serveUI(ctx context.Context, conn *ipc.Conn, m ipc.Message) {

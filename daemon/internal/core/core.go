@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -215,7 +216,7 @@ func (c *Core) RefreshTools(ctx context.Context) {
 		}
 		c.noteHidden(p.Name(), hidden)
 	}
-	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+	slices.SortFunc(tools, func(a, b *mcp.Tool) int { return strings.Compare(a.Name, b.Name) })
 	c.mu.Lock()
 	c.toolIndex = index
 	c.tools = tools
@@ -272,7 +273,7 @@ func (c *Core) PluginTools(ctx context.Context, plugin string) (ipc.PluginTools,
 		}
 		out.Tools = append(out.Tools, pt)
 	}
-	sort.Slice(out.Tools, func(i, j int) bool { return out.Tools[i].Name < out.Tools[j].Name })
+	slices.SortFunc(out.Tools, func(a, b ipc.PluginTool) int { return strings.Compare(a.Name, b.Name) })
 	for _, ti := range c.policy.Tools() {
 		if ti.Plugin == plugin && !listed[ti.Tool] {
 			out.Missing = append(out.Missing, ti.Tool)
@@ -376,7 +377,7 @@ func (c *Core) logCall(ctx context.Context, call model.Call, s *model.Session) i
 	// one knob rules row size and FTS indexing time). The upstream call and
 	// the policy decision used the full input before this point.
 	call.Input = store.TrimJSON(call.Input, limit)
-	if s != nil && call.SessionID != "" {
+	if s != nil {
 		if err := c.sessions.Revive(ctx, *s); err != nil {
 			c.log.Error("revive session", "session", s.ID, "err", err)
 		}
