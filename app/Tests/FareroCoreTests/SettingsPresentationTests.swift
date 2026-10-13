@@ -229,6 +229,13 @@ struct AgentCfgAlertTests {
         #expect(AgentCfgAlert.alerts(for: status(message: long)).first?.title == String(repeating: "가", count: 59) + "…")
     }
 
+    @Test func versionTooOldBlocksOnlyKnownOldVersions() {
+        #expect(status(version: "2.1.150", versionOK: false).versionTooOld)
+        #expect(!status(version: "", versionOK: false).versionTooOld)
+        #expect(!status(version: "2.1.287", versionOK: true).versionTooOld)
+        #expect(!status(cliFound: false, version: "2.1.150", versionOK: false).versionTooOld)
+    }
+
     @Test func outdatedClaudeCode() {
         let alerts = AgentCfgAlert.alerts(for: status(version: "2.1.150", versionOK: false))
         #expect(alerts.count == 1)

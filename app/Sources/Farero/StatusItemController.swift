@@ -66,7 +66,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         for alert in s.agentCfgAlerts {
             menu.addItem(alertItem(alert))
         }
-        if case .failed = registrar.status {
+        if registrar.status.needsAttention {
             menu.addItem(action("로그인 항목에서 데몬 허용…", #selector(openLoginItems)))
         }
         if registrar.status == .translocated {

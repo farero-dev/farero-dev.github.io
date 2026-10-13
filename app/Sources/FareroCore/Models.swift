@@ -33,7 +33,7 @@ public enum SessionStatus: String, Sendable, Codable, CaseIterable {
         case .waitingInput: "입력 대기"
         case .waitingApproval: "승인 대기"
         case .ended: "종료됨"
-        case .unknown: "상태 불명"
+        case .unknown: "알 수 없음"
         }
     }
 }
@@ -488,6 +488,9 @@ public struct AgentCfgStatus: Sendable, Equatable, Decodable {
     public var version: String
     public var minVersion: String
     public var versionOK: Bool
+    /// The CLI version is known and below the minimum (F-06, Q53). An unreadable
+    /// (empty) version is let through, as the daemon does.
+    public var versionTooOld: Bool { cliFound && !version.isEmpty && !versionOK }
     public var settingsPath: String
     public var hooksInstalled: Bool
     public var allowInstalled: Bool

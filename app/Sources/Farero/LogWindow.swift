@@ -186,7 +186,7 @@ struct LogSearchView: View {
                 Picker("에이전트", selection: $search.filter.agent) {
                     Text("전체").tag("")
                     Text("Claude Code").tag("claude")
-                    Text("Codex").tag("codex")
+                    // Codex is post-MVP (Q51): the model still carries "codex", the UI does not offer it.
                 }
                 .frame(width: 170)
                 Picker("출처", selection: sourceBinding) {
