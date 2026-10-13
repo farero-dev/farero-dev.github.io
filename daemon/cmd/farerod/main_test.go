@@ -652,12 +652,22 @@ func TestLogOutput(t *testing.T) {
 		if fi, _ := os.Stat(logPath); fi.Size() != limit+1 {
 			t.Errorf("size at limit = %d, want %d", fi.Size(), limit+1)
 		}
-		// One byte over: started over.
+		// One byte over: kept as farerod.log.1, and a new file starts.
 		f = logOutput().(*os.File)
 		io.WriteString(f, "y")
 		f.Close()
 		if fi, _ := os.Stat(logPath); fi.Size() != 1 {
 			t.Errorf("size over limit = %d, want 1", fi.Size())
+		}
+		if fi, err := os.Stat(logPath + ".1"); err != nil || fi.Size() != limit+1 {
+			t.Errorf("previous log: %v, size %d", err, fi.Size())
+		}
+		// The next rotation replaces the old .1.
+		os.Truncate(logPath, limit+2)
+		f = logOutput().(*os.File)
+		f.Close()
+		if fi, _ := os.Stat(logPath + ".1"); fi.Size() != limit+2 {
+			t.Errorf("replaced .1 size = %d, want %d", fi.Size(), limit+2)
 		}
 	})
 

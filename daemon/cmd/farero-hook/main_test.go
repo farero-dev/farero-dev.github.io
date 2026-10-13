@@ -18,6 +18,9 @@ func TestHookExitsAtOnceWithoutDaemon(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
+	// The first run of a new binary waits for macOS to assess it, which can
+	// take seconds; run it once so the timings below measure the hook.
+	exec.Command(bin, "--version").Run()
 	dir, err := os.MkdirTemp("/tmp", "frh") // short: socket paths are limited to 104 bytes
 	if err != nil {
 		t.Fatal(err)

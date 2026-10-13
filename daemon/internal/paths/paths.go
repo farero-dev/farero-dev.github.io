@@ -36,9 +36,6 @@ func Socket() string {
 // DB returns the SQLite database path.
 func DB() string { return filepath.Join(SupportDir(), "farero.db") }
 
-// Config returns the daemon config file path (gateway port and similar).
-func Config() string { return filepath.Join(SupportDir(), "config.json") }
-
 // Backups returns the directory for agent config backups.
 func Backups() string { return filepath.Join(SupportDir(), "backups") }
 

@@ -111,6 +111,12 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	}
 	c.broker = broker.New(c, o.ApprovalTimeout)
 	c.sessions, err = session.NewManager(ctx, o.Store, func(s model.Session) {
+		// Session grants end with the session (6-2), which includes
+		// farerod marking it unknown because its agent is gone: a
+		// `claude --resume` of the same id must ask again.
+		if s.Status == model.StatusUnknown {
+			c.policy.EndSession(s.ID)
+		}
 		c.hub.broadcast(ipc.TypeSessionUpdated, s)
 	})
 	if err != nil {
