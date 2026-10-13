@@ -201,3 +201,15 @@ func TestPluginToolsDeadline(t *testing.T) {
 		t.Fatalf("deadline in %v", d)
 	}
 }
+
+// Correcting a refused call's row logs a database failure instead of
+// losing it.
+func TestRanAnywayLogsStoreFailure(t *testing.T) {
+	var logs syncBuffer
+	h := startHarness(t, memStore(t), devTable(), time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	h.st.Close()
+	h.core.ranAnyway(context.Background(), 1)
+	if !strings.Contains(logs.String(), `msg="audit log"`) {
+		t.Fatalf("not logged:\n%s", logs.String())
+	}
+}

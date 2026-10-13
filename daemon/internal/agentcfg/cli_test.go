@@ -129,3 +129,23 @@ func TestPlanNamesTheCLI(t *testing.T) {
 		t.Fatalf("configured CLI: %+v %v", p.Commands, err)
 	}
 }
+
+// The install locations are tried in order: the first one that has the
+// executable wins.
+func TestFindCLIFirstInstallLocationWins(t *testing.T) {
+	for _, p := range []string{"/opt/homebrew/bin/claude", "/usr/local/bin/claude"} {
+		if _, err := os.Stat(p); err == nil {
+			t.Skipf("%s exists on this machine", p)
+		}
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("SHELL", "/usr/bin/false")
+	first, later := filepath.Join(home, ".local/bin/claude"), filepath.Join(home, ".bun/bin/claude")
+	writeExec(t, first, "exit 0")
+	writeExec(t, later, "exit 0")
+	if got := (&Claude{}).findCLI(context.Background()); got != first {
+		t.Fatalf("got %q, want %q", got, first)
+	}
+}
