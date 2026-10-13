@@ -549,3 +549,13 @@ M5 코드(4개 플러그인 연결, 토큰 저장·갱신, 앱 플러그인 창)
 - 시험: FareroCore 테스트 148개 통과(새 스위트 "App login item": plist 키, 켜짐 기본값, 쓰기·지우기·이동 판정, 넘겨주기 인자). 넘겨주기는 디버그 빌드 실행 파일을 `CFBundleExecutable`이 마커만 남기는 스크립트인 임시 번들에 넣어 `--open-at-login`으로 실행했다: 종료 코드 0, LaunchServices가 번들을 띄웠다(부모 PID 1). 실제 앱을 이 맥에서 띄우면 개발 계정의 farerod 등록을 바꾸므로 앱 전체 흐름은 새 계정 확인에서 본다.
 - `release-check.sh`: `installed`·`reboot`이 앱 plist(경로, `--open-at-login`, RunAtLoad, KeepAlive 없음, 로그인 항목에서 꺼짐 여부)를 보고, `reboot`은 launchd가 로그인 때 `dev.farero.app`을 올렸는지와 Farero가 재시동 뒤 시작됐는지를 실패 조건으로 본다. `translocated`·`pre`·`uninstalled`는 앱 plist와 작업이 없어야 한다. README와 체크리스트의 제거 절차에 `bootout gui/<uid>/dev.farero.app`과 plist 삭제를 더했다.
 - 확인 못 한 것(새 계정에서): 재부팅 뒤 실제로 열리는지, 로그인 항목에 어떤 이름으로 보이는지, 시스템 설정에서 끄면 `statusForLegacyPlist`와 `launchctl print-disabled`가 어떻게 보이는지.
+
+## 2026-10-13
+
+### 명세 대조: 등대 오류 상태의 범위 (F-12)
+
+기능 명세서 F-12는 오류 상태를 "도구·업스트림 실패"로 적었는데, 앱은 게이트웨이(플러그인) 호출이 실패했을 때만 오류로 보였다(`call.logged`의 `error`). 에이전트 자체 도구가 실패하면 `PostToolUseFailure` 훅은 오지만 데몬이 로그 행을 만들지 않아 앱이 알 수 없다.
+
+- 결정(사용자): 오류 상태는 게이트웨이 호출·업스트림 실패만 뜻한다. 에이전트 자체 도구 실패는 넣지 않는다. 명세 F-12 문구를 이렇게 고쳤고 코드는 그대로다.
+- 이유: 에이전트 도구 실패는 작업 중 흔히 생긴다(테스트 실패, 0이 아닌 종료 코드 등). 이 맥의 최근 세션 50개에서 `PostToolUseFailure:Bash`가 54번, Bash 호출의 약 2%였다. 이것까지 오류로 보이면 등대가 수시로 오류로 바뀌어, 사용자가 손봐야 하는 실패(플러그인 연결·업스트림 오류)가 묻힌다.
+- 코드: 앱은 `app/Sources/FareroCore/AppState.swift`에서 `call.logged`의 `error`로 오류 시각을 정하고, 데몬은 게이트웨이 호출에만 `Call.Error`를 채운다(`daemon/internal/core/calls.go`).
