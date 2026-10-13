@@ -66,8 +66,8 @@ import sys
 import time
 from datetime import datetime
 
-from e2elib import BIN, CLAUDE, MODEL, ROOT, Abort, Agent, Harness, gateway_headers, http, print_daemon_warnings, \
-    ready, rpc_result, step_register, step_remove
+from e2elib import BIN, CLAUDE, MODEL, ROOT, Abort, Agent, Harness, check_run_dir, gateway_headers, http, \
+    print_daemon_warnings, ready, rpc_result, step_register, step_remove
 
 
 def load(name):
@@ -97,6 +97,7 @@ def fact(h, label, text):
 
 
 def prepare():
+    check_run_dir(E)
     for name in ("alpha", "beta", "gamma"):
         subprocess.run(["rm", "-rf", os.path.join(WORK, name)])
         os.makedirs(os.path.join(WORK, name))

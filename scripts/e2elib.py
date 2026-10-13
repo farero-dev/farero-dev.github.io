@@ -27,6 +27,8 @@ import shutil
 import sqlite3
 import struct
 import subprocess
+import sys
+import tempfile
 import termios
 import time
 import unicodedata
@@ -902,9 +904,22 @@ def step_remove(h):
     h.check("farero" not in (cj.get("mcpServers") or {}), "the MCP server entry is gone from .claude.json")
 
 
+def check_run_dir(e):
+    """Exits unless e resolves to a directory strictly below /tmp or $TMPDIR.
+    Every script deletes E2E_DIR (or all of it but the plugin tokens) before
+    a run, so a mistyped E2E_DIR such as /tmp or a path in $HOME, or a symlink
+    to one, must stop here."""
+    real = os.path.realpath(e)
+    for root in {os.path.realpath("/tmp"), os.path.realpath(tempfile.gettempdir())}:
+        if real != root and os.path.commonpath([real, root]) == root:
+            return
+    sys.exit(f"E2E_DIR must be a directory below /tmp or $TMPDIR, not {e} ({real})")
+
+
 def prepare(e, work, names):
     """A fresh run directory and agent folders, and the dev binaries unless
     E2E_NO_BUILD=1. Returns False when the build failed."""
+    check_run_dir(e)
     shutil.rmtree(e, ignore_errors=True)
     os.makedirs(os.path.join(e, "claude"))
     for n in names:

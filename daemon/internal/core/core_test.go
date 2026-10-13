@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -70,7 +71,14 @@ func startHarness(t *testing.T, st *store.Store, tab *policy.Table, approvalTime
 	if err := c.StartGateway(ctx); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		// A test that fails while a gateway call waits on a card must fail
+		// now, not after the approval timeout: the HTTP server's shutdown
+		// waits for that call.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c.Shutdown(ctx)
+	})
 
 	dir, _ := os.MkdirTemp("/tmp", "frc")
 	t.Cleanup(func() { os.RemoveAll(dir) })
@@ -119,9 +127,13 @@ func (h *harness) ui() *fakeUI {
 	return u
 }
 
+// waitTimeout bounds how long the fake app waits for a message. The tests
+// with inputs over 1 MB take a few seconds under -race on GitHub's runners.
+const waitTimeout = 15 * time.Second
+
 func (u *fakeUI) next(typ string) ipc.Message {
 	u.t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case m, ok := <-u.msgs:
@@ -140,7 +152,7 @@ func (u *fakeUI) next(typ string) ipc.Message {
 // reply waits for the reply to request id, whatever its type.
 func (u *fakeUI) reply(id string) ipc.Message {
 	u.t.Helper()
-	timeout := time.After(5 * time.Second)
+	timeout := time.After(waitTimeout)
 	for {
 		select {
 		case m, ok := <-u.msgs:
@@ -233,7 +245,16 @@ func (h *harness) agent(sessionID string, pid int) *agent {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	h.t.Cleanup(func() { cs.Close() })
+	h.t.Cleanup(func() {
+		// Close waits for calls in flight; one still waiting on a card
+		// would hold a failed test until the approval timeout.
+		done := make(chan struct{})
+		go func() { cs.Close(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+	})
 	h.hook(sessionID, "SessionStart", "", nil, pid)
 	return &agent{h: h, cs: cs, sid: sessionID, pid: pid}
 }
@@ -733,12 +754,152 @@ func TestCallLoggedBroadcastIsTrimmed(t *testing.T) {
 	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/a", "content": big}, 1)
 	u.answer(u.approval().ID, model.AnswerDeny)
 	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
-	if len(c.Input) > 200 || !strings.Contains(string(c.Input), "bytes") {
-		t.Fatalf("broadcast input not trimmed: %d bytes", len(c.Input))
+	// The bounds in these tests are literals, so raising a limit constant
+	// fails them.
+	if len(c.Input) > 8<<10 || !strings.Contains(string(c.Input), `"file_path":"/tmp/a"`) {
+		t.Fatalf("broadcast input not trimmed to a bounded JSON object: %d bytes", len(c.Input))
+	}
+	// The row keeps as much as the Q46 budget allows (16 KB by default).
+	stored := h.lastCall()
+	if len(stored.Input) > store.DefaultResultLimit || len(stored.Input) < store.DefaultResultLimit-100 {
+		t.Fatalf("stored input %d bytes, want close to %d", len(stored.Input), store.DefaultResultLimit)
+	}
+	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/a")
+}
+
+// A log.result_limit outside 1 KB–1 MB, or not a number, falls back to the
+// default (Q46) rather than being used.
+func TestResultLimitIgnoresBadSetting(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	ctx := context.Background()
+	for _, v := range []string{"99999999", "512", "x", ""} {
+		if err := h.st.SetSetting(ctx, settingResultLimit, v); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.core.resultLimit(ctx); got != store.DefaultResultLimit {
+			t.Fatalf("setting %q: limit %d", v, got)
+		}
+	}
+	h.st.SetSetting(ctx, settingResultLimit, "4096")
+	if got := h.core.resultLimit(ctx); got != 4096 {
+		t.Fatalf("valid setting: limit %d", got)
+	}
+}
+
+// inputObject decodes a bounded input and checks it is still a JSON object
+// no larger than limit that kept its short field.
+func inputObject(t *testing.T, raw json.RawMessage, limit int, key, want string) map[string]any {
+	t.Helper()
+	if len(raw) > limit {
+		t.Fatalf("input %d bytes, limit %d", len(raw), limit)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil || m[key] != want {
+		t.Fatalf("input not a JSON object with %s=%q: %v %.80s", key, want, err, raw)
+	}
+	return m
+}
+
+// A Write of a file over 1 MB: the card and the log row stay bounded, while
+// the whole content is what policy and the agent see.
+func TestApprovalCardBoundsAgentInput(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	big := strings.Repeat("나", 400_000) // 1.2 MB, over the 1 MiB card bound
+	go h.hook("s1", "PermissionRequest", "Write", map[string]any{"file_path": "/tmp/big", "content": big}, 1)
+	ap := u.approval()
+	m := inputObject(t, ap.Input, 1<<20, "file_path", "/tmp/big")
+	if c, _ := m["content"].(string); !strings.HasPrefix(c, "나나") || !strings.Contains(c, "bytes]") {
+		t.Fatalf("content not cut with a marker: %.40q", c)
+	}
+	// A UI that connects while the card is open gets the bounded copy too.
+	u2 := h.ui()
+	if len(u2.snap.Approvals) != 1 {
+		t.Fatalf("snapshot: %+v", u2.snap.Approvals)
+	}
+	inputObject(t, u2.snap.Approvals[0].Input, 1<<20, "file_path", "/tmp/big")
+	u.answer(ap.ID, model.AnswerDeny)
+	stored := h.lastCall()
+	inputObject(t, stored.Input, store.DefaultResultLimit, "file_path", "/tmp/big")
+	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
+	inputObject(t, c.Input, 8<<10, "file_path", "/tmp/big")
+}
+
+// A plugin call with an argument over 1 MB (a Resend attachment) reaches the
+// upstream unchanged; only the card and the row are bounded.
+func TestUpstreamGetsFullPluginInput(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	a := h.agent("s1", 100)
+	big := strings.Repeat("Zm9v", 300_000) // 1.2 MB, over the 1 MiB card bound
+	ch := a.callAsync("dev_write_sim", map[string]any{"text": big, "to": "a@b.c"})
+	ap := u.approval()
+	inputObject(t, ap.Input, 1<<20, "to", "a@b.c")
+	// Correlation matched the PreToolUse hook on the full arguments.
+	if ap.SessionID != "claude:s1" || !ap.AllowSession {
+		t.Fatalf("card not tied to the session: %q allow_session=%v", ap.SessionID, ap.AllowSession)
+	}
+	u.answer(ap.ID, model.AnswerAllow)
+	if res := <-ch; res.IsError || text(res) != "wrote: "+big {
+		t.Fatalf("upstream did not get the full input: err=%v len=%d", res.IsError, len(text(res)))
 	}
 	stored := h.lastCall()
-	if len(stored.Input) < 20000 {
-		t.Fatalf("stored input was trimmed: %d", len(stored.Input))
+	inputObject(t, stored.Input, store.DefaultResultLimit, "to", "a@b.c")
+	if stored.Decision != model.DecisionUserAllowed || stored.SessionID != "claude:s1" {
+		t.Fatalf("log: %+v", stored)
+	}
+	// The 1.2 MB result: the row keeps the Q46 budget, call.logged 2 KB, and
+	// both carry the full size.
+	resultBytes := len("wrote: ") + len(big)
+	if len(stored.ResultText) > store.DefaultResultLimit || stored.ResultBytes != resultBytes {
+		t.Fatalf("stored result %d bytes of %d", len(stored.ResultText), stored.ResultBytes)
+	}
+	c, _ := ipc.Decode[model.Call](u.next(ipc.TypeCallLogged))
+	if len(c.ResultText) > 2<<10 || c.ResultBytes != resultBytes {
+		t.Fatalf("broadcast result %d bytes of %d", len(c.ResultText), c.ResultBytes)
+	}
+	inputObject(t, c.Input, 8<<10, "to", "a@b.c")
+}
+
+// A session grant for a Bash command is scoped by the whole command (Q38),
+// not by the bounded copy on the card: the same 1.2 MB command runs without a
+// card, and one that differs only past what the card shows still asks.
+func TestSessionGrantUsesFullAgentInput(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	cmdA := strings.Repeat("a", 1_200_000) // over the 1 MiB card bound
+	cmdB := cmdA[:len(cmdA)-1] + "b"
+	bash := func(cmd string) chan ipc.HookDecision {
+		done := make(chan ipc.HookDecision, 1)
+		go func() {
+			d, _ := ipc.Decode[ipc.HookDecision](h.hook("s1", "PermissionRequest", "Bash", map[string]any{"command": cmd}, 1))
+			done <- d
+		}()
+		return done
+	}
+
+	done := bash(cmdA)
+	u.answer(u.approval().ID, model.AnswerAllowSession)
+	if d := <-done; d.Behavior != ipc.BehaviorAllow {
+		t.Fatalf("first: %+v", d)
+	}
+
+	done = bash(cmdA)
+	select {
+	case d := <-done:
+		if d.Behavior != ipc.BehaviorAllow {
+			t.Fatalf("granted command: %+v", d)
+		}
+	case <-time.After(3 * time.Second):
+		u.answer(u.approval().ID, model.AnswerDeny)
+		<-done
+		t.Fatal("the granted command asked again")
+	}
+
+	done = bash(cmdB)
+	u.answer(u.approval().ID, model.AnswerDeny)
+	if d := <-done; d.Behavior != ipc.BehaviorDeny {
+		t.Fatalf("other command: %+v", d)
 	}
 }
 
@@ -854,9 +1015,113 @@ func TestPluginToolsReportsClassification(t *testing.T) {
 	if !slices.Equal(got.Missing, []string{"fail_sim"}) {
 		t.Errorf("missing: %v", got.Missing)
 	}
+	if !slices.IsSortedFunc(got.Tools, func(a, b ipc.PluginTool) int { return strings.Compare(a.Name, b.Name) }) {
+		t.Errorf("tools not sorted by name: %+v", got.Tools)
+	}
 
 	u.conn.Send(ipc.TypePluginTools, "g", ipc.PluginRef{Plugin: "github"})
 	if m := u.next(ipc.TypeError); !strings.Contains(string(m.Data), "not connected") {
 		t.Fatalf("expected not connected, got %s", m.Data)
+	}
+}
+
+// A hook event without a session id is acknowledged and ignored.
+func TestHookWithoutSessionIDIsIgnored(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	m := h.hookRaw(map[string]any{"hook_event_name": "SessionStart", "cwd": "/tmp/p"}, 100)
+	if m.Type != ipc.TypeHookAck {
+		t.Fatalf("reply: %+v", m)
+	}
+	if l := h.core.sessions.List(); len(l) != 0 {
+		t.Fatalf("sessions: %+v", l)
+	}
+}
+
+// An event from a hook that did not name its agent counts as Claude Code's.
+func TestHookAgentDefaultsToClaude(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	conn, err := ipc.Dial(h.sock, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	raw, _ := json.Marshal(map[string]any{"session_id": "s1", "hook_event_name": "SessionStart", "cwd": "/tmp/p"})
+	conn.Send(ipc.TypeHookEvent, "h", ipc.HookEvent{Input: raw, PID: 100})
+	if _, err := conn.Read(); err != nil {
+		t.Fatal(err)
+	}
+	if s, ok := h.core.sessions.Get("claude:s1"); !ok || s.Agent != model.AgentClaude {
+		t.Fatalf("session: %+v %v", s, ok)
+	}
+}
+
+// The gateway port picked on the first run is saved and used again after a
+// restart (Claude Code's registration names it).
+func TestGatewayPortSurvivesRestart(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	ctx := context.Background()
+	port := h.core.GatewayInfo().Port
+	if saved, _ := h.st.Setting(ctx, settingGatewayPort); port == 0 || saved != strconv.Itoa(port) {
+		t.Fatalf("port %d, saved %q", port, saved)
+	}
+	h.core.Shutdown(ctx)
+	h2 := startHarness(t, h.st, devTable(), time.Minute, nil)
+	if got := h2.core.GatewayInfo(); !got.Running || got.Port != port {
+		t.Fatalf("after restart: %+v, want port %d", got, port)
+	}
+}
+
+// Exposed tools are sorted by name and keep the upstream's input schema.
+func TestExposedToolsSortedWithSchema(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	h.core.mu.Lock()
+	tools := slices.Clone(h.core.tools)
+	h.core.mu.Unlock()
+	if len(tools) < 2 || !slices.IsSortedFunc(tools, func(a, b *mcp.Tool) int { return strings.Compare(a.Name, b.Name) }) {
+		t.Fatalf("tools not sorted: %d", len(tools))
+	}
+	for _, x := range tools {
+		if x.Name == "dev_write_sim" {
+			if b, _ := json.Marshal(x.InputSchema); !strings.Contains(string(b), `"text"`) {
+				t.Fatalf("schema replaced: %s", b)
+			}
+			return
+		}
+	}
+	t.Fatal("dev_write_sim not exposed")
+}
+
+// Upstream tools missing from the table are logged once per change, not on
+// every refresh.
+func TestHiddenToolsLoggedOnChange(t *testing.T) {
+	var logs syncBuffer
+	h := startHarness(t, memStore(t), devTable(), time.Minute, slog.New(slog.NewTextHandler(&logs, nil)))
+	// Startup refreshed once; two more refreshes with the same tools must
+	// not log again.
+	h.core.RefreshTools(context.Background())
+	h.core.RefreshTools(context.Background())
+	const msg = "not in the classification table are hidden"
+	if n := strings.Count(logs.String(), msg); n != 1 {
+		t.Fatalf("logged %d times:\n%s", n, logs.String())
+	}
+	if !strings.Contains(logs.String(), "unclassified_sim") {
+		t.Fatalf("hidden tool not named:\n%s", logs.String())
+	}
+}
+
+// The app gets an error for an answer to a card that is not open, and OK
+// for a real one.
+func TestApprovalResponseReplies(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	u.conn.Send(ipc.TypeApprovalResponse, "x", ipc.ApprovalResponse{ApprovalID: "nope", Answer: model.AnswerAllow})
+	if m := u.reply("x"); m.Type != ipc.TypeError {
+		t.Fatalf("unknown card: %+v", m)
+	}
+	go h.hook("s1", "PermissionRequest", "Bash", map[string]any{"command": "ls"}, 100)
+	ap := u.approval()
+	u.answer(ap.ID, model.AnswerDeny)
+	if m := u.reply("r-" + ap.ID); m.Type != ipc.TypeOK {
+		t.Fatalf("real card: %+v", m)
 	}
 }

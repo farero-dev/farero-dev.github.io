@@ -323,3 +323,53 @@ func TestOverridesSurviveTableUpdate(t *testing.T) {
 		t.Errorf("ignored after reset: %v", e2.IgnoredOverrides())
 	}
 }
+
+// Every agent tool that edits a file is scoped by its path (Q38); Bash by
+// its command. A different path or command needs its own grant.
+func TestGrantKeyAgentScopesByPath(t *testing.T) {
+	for _, tc := range []struct {
+		tool, a, b, other string
+	}{
+		{"Write", `{"file_path":"/a.go","content":"1"}`, `{"file_path":"/a.go","content":"2"}`, `{"file_path":"/b.go","content":"1"}`},
+		{"MultiEdit", `{"file_path":"/a.go","edits":[1]}`, `{"file_path":"/a.go","edits":[2]}`, `{"file_path":"/b.go","edits":[1]}`},
+		{"NotebookEdit", `{"notebook_path":"/n.ipynb","new_source":"x"}`, `{"notebook_path":"/n.ipynb","new_source":"y"}`, `{"notebook_path":"/m.ipynb","new_source":"x"}`},
+		{"Bash", `{"command":"make","description":"a"}`, `{"command":"make","description":"b"}`, `{"command":"make deploy","description":"a"}`},
+	} {
+		a := GrantKeyAgent(tc.tool, json.RawMessage(tc.a))
+		if b := GrantKeyAgent(tc.tool, json.RawMessage(tc.b)); a != b {
+			t.Errorf("%s: same target, different keys %q %q", tc.tool, a, b)
+		}
+		if o := GrantKeyAgent(tc.tool, json.RawMessage(tc.other)); a == o {
+			t.Errorf("%s: other target shares the key %q", tc.tool, a)
+		}
+	}
+	// The same path under another tool is another grant.
+	if GrantKeyAgent("Write", json.RawMessage(`{"file_path":"/a.go"}`)) == GrantKeyAgent("Edit", json.RawMessage(`{"file_path":"/a.go"}`)) {
+		t.Error("Write and Edit share a key")
+	}
+}
+
+// Tools lists every classified tool, sorted by plugin, then tool.
+func TestToolsSorted(t *testing.T) {
+	tab := DefaultTable()
+	tab.AddPlugin("aaa", map[string]Rule{"zeta": {Level: LevelAsk}, "alpha": {Level: LevelAuto}})
+	list := NewEngine(tab, nil).Tools()
+	if len(list) < 3 || list[0].Plugin != "aaa" || list[0].Tool != "alpha" || list[1].Tool != "zeta" {
+		t.Fatalf("first entries: %+v", list[:min(3, len(list))])
+	}
+	for i := 1; i < len(list); i++ {
+		p, q := list[i-1], list[i]
+		if p.Plugin > q.Plugin || (p.Plugin == q.Plugin && p.Tool >= q.Tool) {
+			t.Fatalf("not sorted at %d: %s/%s then %s/%s", i, p.Plugin, p.Tool, q.Plugin, q.Tool)
+		}
+	}
+}
+
+// AddPlugin works on a table without plugins too.
+func TestAddPluginToEmptyTable(t *testing.T) {
+	var tab Table
+	tab.AddPlugin("dev", map[string]Rule{"echo": {Level: LevelAuto}})
+	if eff, ok := NewEngine(&tab, nil).Lookup("dev", "echo"); !ok || eff.Level != LevelAuto {
+		t.Fatalf("lookup: %+v %v", eff, ok)
+	}
+}

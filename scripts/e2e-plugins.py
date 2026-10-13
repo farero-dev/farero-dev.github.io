@@ -77,8 +77,8 @@ import subprocess
 import sys
 import time
 
-from e2elib import (BIN, ROOT, Abort, Agent, Harness, gateway_headers, http, mcp_requests, print_daemon_warnings,
-                    ready, result_text, rpc_result, step_register, step_remove, transcript)
+from e2elib import (BIN, ROOT, Abort, Agent, Harness, check_run_dir, gateway_headers, http, mcp_requests,
+                    print_daemon_warnings, ready, result_text, rpc_result, step_register, step_remove, transcript)
 
 E = os.environ.get("E2E_DIR", "/tmp/frm5")
 WORK = os.path.join(ROOT, "build", "e2e-plugins")
@@ -137,6 +137,7 @@ def prepare():
     """Keeps the plugin credentials, removes the rest of E2E_DIR, and builds
     the dev binaries unless E2E_NO_BUILD=1. Returns False when the build
     failed."""
+    check_run_dir(E)
     stop_farerod_of(E)
     os.makedirs(E, exist_ok=True)
     for name in os.listdir(E):

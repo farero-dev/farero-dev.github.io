@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,6 +147,13 @@ func TestTranscriptInterrupted(t *testing.T) {
 		{"marker before big rows", []string{rowPrompt, rowToolUse, rowRejected, rowInterrupt, big, cost}, true},
 		{"next prompt after the marker", []string{rowInterrupt, rowPrompt}, false},
 		{"empty", nil, false},
+		// The first row of the file counts (there is no partial line before it).
+		{"marker is the first row", []string{rowInterrupt}, true},
+		// More than the 1 MB chunk of bookkeeping after the marker: the last,
+		// 8 MB chunk still finds it.
+		{"marker before more than 1 MB", []string{rowPrompt, rowInterrupt, big, big, big, big, cost}, true},
+		// A text block counts only when it is the marker.
+		{"other text block", []string{rowInterrupt, `{"type":"user","message":{"role":"user","content":[{"type":"text","text":"keep going"}]}}`}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			writeTranscript(t, path, c.rows...)
@@ -308,5 +316,134 @@ func TestSweepWithoutPID(t *testing.T) {
 	m.Sweep(ctx, func(int, time.Time) bool { return false })
 	if s, _ := m.Get("claude:s1"); s.Status != model.StatusUnknown {
 		t.Fatalf("got %s", s.Status)
+	}
+}
+
+// probeSession puts a session into the state CheckInterrupts looks at:
+// running, with a transcript known from its last event.
+func probeSession(t *testing.T, m *Manager, id, path, event string) {
+	t.Helper()
+	in := HookInput{SessionID: id, Cwd: "/Users/me/proj", HookEventName: event, TranscriptPath: path}
+	if _, err := m.Apply(context.Background(), model.AgentClaude, in, "", 4242); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A running session whose transcript is gone is skipped, not a crash.
+func TestCheckInterruptsMissingTranscript(t *testing.T) {
+	m, _, _ := newManager(t)
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	writeTranscript(t, path, rowPrompt)
+	probeSession(t, m, "s1", path, EventUserPromptSubmit)
+	os.Remove(path)
+	m.CheckInterrupts(context.Background())
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusRunning {
+		t.Fatalf("status: %s", s.Status)
+	}
+}
+
+// A transcript that grew is read again even when its mtime did not move
+// (two writes within the clock's resolution).
+func TestCheckInterruptsSameMtimeNewSize(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "t.jsonl")
+	writeTranscript(t, path, rowPrompt)
+	probeSession(t, m, "s1", path, EventUserPromptSubmit)
+	appendTranscript(t, path, rowToolUse)
+	m.CheckInterrupts(ctx) // remembers this size and mtime
+	fi, _ := os.Stat(path)
+	appendTranscript(t, path, rowRejected, rowInterrupt)
+	if err := os.Chtimes(path, fi.ModTime(), fi.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	m.CheckInterrupts(ctx)
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingInput {
+		t.Fatalf("status: %s", s.Status)
+	}
+}
+
+// Every session is checked, whatever the others look like: waiting ones and
+// ones whose transcript did not grow are skipped, and transcripts without a
+// marker leave theirs alone.
+func TestCheckInterruptsVisitsEverySession(t *testing.T) {
+	m, _, _ := newManager(t)
+	dir := t.TempDir()
+	for i := 0; i < 12; i++ {
+		waiting := filepath.Join(dir, fmt.Sprintf("w%d.jsonl", i))
+		writeTranscript(t, waiting, rowPrompt)
+		probeSession(t, m, fmt.Sprintf("w%d", i), waiting, EventStop)
+		quiet := filepath.Join(dir, fmt.Sprintf("q%d.jsonl", i))
+		writeTranscript(t, quiet, rowPrompt)
+		probeSession(t, m, fmt.Sprintf("q%d", i), quiet, EventUserPromptSubmit)
+		appendTranscript(t, quiet, rowToolUse)
+		// Nothing written since its last event.
+		idle := filepath.Join(dir, fmt.Sprintf("i%d.jsonl", i))
+		writeTranscript(t, idle, rowPrompt)
+		probeSession(t, m, fmt.Sprintf("i%d", i), idle, EventUserPromptSubmit)
+	}
+	target := filepath.Join(dir, "target.jsonl")
+	writeTranscript(t, target, rowPrompt)
+	probeSession(t, m, "target", target, EventUserPromptSubmit)
+	appendTranscript(t, target, rowToolUse, rowRejected, rowInterrupt)
+	m.CheckInterrupts(context.Background())
+	if s, _ := m.Get("claude:target"); s.Status != model.StatusWaitingInput {
+		t.Fatalf("target: %s", s.Status)
+	}
+	for i := 0; i < 12; i++ {
+		if s, _ := m.Get(fmt.Sprintf("claude:q%d", i)); s.Status != model.StatusRunning {
+			t.Fatalf("q%d: %s", i, s.Status)
+		}
+	}
+}
+
+// Apply keeps the transcript it knows: an event without a path leaves it,
+// a new path replaces it, and its read offset follows the file's size
+// (0 when the file was emptied, unchanged when it cannot be read).
+func TestApplyTracksTranscript(t *testing.T) {
+	m, _, _ := newManager(t)
+	dir := t.TempDir()
+	p1, p2 := filepath.Join(dir, "a.jsonl"), filepath.Join(dir, "b.jsonl")
+	tr := func() *transcript {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.transcripts["claude:s1"]
+	}
+	apply := func(event, path string) {
+		t.Helper()
+		in := HookInput{SessionID: "s1", HookEventName: event, TranscriptPath: path}
+		if _, err := m.Apply(context.Background(), model.AgentClaude, in, "", 4242); err != nil {
+			t.Fatal(err)
+		}
+	}
+	apply(EventSessionStart, "")
+	if tr() != nil {
+		t.Fatal("transcript without a path")
+	}
+	writeTranscript(t, p1, rowPrompt, rowToolUse)
+	size, _ := os.Stat(p1)
+	apply(EventUserPromptSubmit, p1)
+	if x := tr(); x == nil || x.path != p1 || x.from != size.Size() {
+		t.Fatalf("p1: %+v", x)
+	}
+	apply(EventPreToolUse, "")
+	if x := tr(); x == nil || x.path != p1 {
+		t.Fatalf("an event without a path replaced it: %+v", x)
+	}
+	os.Remove(p1)
+	apply(EventPostToolUse, p1)
+	if x := tr(); x.from != size.Size() {
+		t.Fatalf("unreadable file moved the offset: %+v", x)
+	}
+	writeTranscript(t, p1)
+	os.Truncate(p1, 0)
+	apply(EventStop, p1)
+	if x := tr(); x.from != 0 {
+		t.Fatalf("emptied file: %+v", x)
+	}
+	writeTranscript(t, p2, rowPrompt)
+	apply(EventUserPromptSubmit, p2)
+	if x := tr(); x.path != p2 {
+		t.Fatalf("new path: %+v", x)
 	}
 }

@@ -1,13 +1,17 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
-	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/farero-dev/farero/daemon/internal/model"
 )
@@ -145,6 +149,18 @@ func TestTruncateUTF8(t *testing.T) {
 	if got := TruncateUTF8(s, 100); got != s {
 		t.Fatalf("got %q", got)
 	}
+	// Exactly at the limit nothing is cut (and s[limit] is out of range),
+	// and a limit of 0 or less means no limit.
+	for _, limit := range []int{len(s), 0, -1} {
+		if got := TruncateUTF8(s, limit); got != s {
+			t.Fatalf("limit %d: got %q", limit, got)
+		}
+	}
+	// A string that starts mid-rune cuts to nothing rather than walking
+	// past its start.
+	if got := TruncateUTF8("\x80\x80\x80\x80", 2); got != "" {
+		t.Fatalf("got %q", got)
+	}
 }
 
 func TestMigrationBackupAndReopen(t *testing.T) {
@@ -162,6 +178,10 @@ func TestMigrationBackupAndReopen(t *testing.T) {
 	defer s2.Close()
 	if _, err := s2.Session(context.Background(), "claude:persist"); err != nil {
 		t.Fatalf("session lost across reopen: %v", err)
+	}
+	// A new database and an up-to-date one have nothing to back up.
+	if baks, _ := filepath.Glob(path + ".bak-*"); len(baks) != 0 {
+		t.Fatalf("unexpected backups: %v", baks)
 	}
 }
 
@@ -198,6 +218,39 @@ func TestCallFilterAcceptsEmptyDates(t *testing.T) {
 	}
 	if err := json.Unmarshal([]byte(`{"from":"2026-10-02T09:00:00+09:00"}`), &f); err != nil || f.From.IsZero() {
 		t.Fatalf("%+v %v", f, err)
+	}
+	var g CallFilter
+	if err := json.Unmarshal([]byte(`{"from":"2026-10-01T00:00:00Z","to":"2026-10-02T00:00:00Z"}`), &g); err != nil ||
+		!g.From.Equal(time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)) || !g.To.Equal(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("both dates: %+v %v", g, err)
+	}
+	for _, bad := range []string{`{"from":"yesterday"}`, `{"from":"2026-10-01T00:00:00Z","to":"tomorrow"}`} {
+		if err := json.Unmarshal([]byte(bad), &g); err == nil {
+			t.Errorf("%s: no error", bad)
+		}
+	}
+}
+
+// InsertCall returns the new row's id, and the timestamp comes back as
+// stored (to the millisecond).
+func TestInsertCallIDAndTime(t *testing.T) {
+	s := newMem(t)
+	ctx := context.Background()
+	ts := time.UnixMilli(1_791_000_000_123)
+	var ids []int64
+	for _, tool := range []string{"a", "b"} {
+		id, err := s.InsertCall(ctx, model.Call{TS: ts, Kind: model.KindPlugin, Tool: tool, Input: json.RawMessage(`{}`)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if ids[0] <= 0 || ids[1] != ids[0]+1 {
+		t.Fatalf("ids: %v", ids)
+	}
+	calls, err := s.QueryCalls(ctx, CallFilter{Tool: "b"})
+	if err != nil || len(calls) != 1 || calls[0].ID != ids[1] || !calls[0].TS.Equal(ts) {
+		t.Fatalf("row: %v %+v", err, calls)
 	}
 }
 
@@ -275,8 +328,16 @@ func TestMigrateFromV1(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := os.Stat(path + ".bak-v1"); err != nil {
-		t.Fatalf("no backup: %v", err)
+	// The backup is the v1 database, not just a file of that name. (Not
+	// byte for byte: opening in WAL mode rewrites the header first.)
+	bak, err := sql.Open("sqlite", "file:"+path+".bak-v1?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bak.Close()
+	var v int
+	if err := bak.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 1 {
+		t.Fatalf("backup: version %d, %v", v, err)
 	}
 	x := addSession(t, s, "old")
 	x.Tainted = true
@@ -286,5 +347,96 @@ func TestMigrateFromV1(t *testing.T) {
 	}
 	if got, _ := s.TaintTombstones(context.Background()); !got[x.ID] {
 		t.Fatalf("tombstones: %v", got)
+	}
+}
+
+func TestTrimJSON(t *testing.T) {
+	// An input that fits comes back byte for byte, even right at the limit
+	// and with key order or spacing that re-encoding would change.
+	small := json.RawMessage(`{"b": 1, "a": "<x>"}`)
+	for _, limit := range []int{100, len(small)} {
+		if got := TrimJSON(small, limit); !bytes.Equal(got, small) {
+			t.Fatalf("limit %d: small input changed: %s", limit, got)
+		}
+	}
+	big := strings.Repeat("가", 5000) // 15000 bytes
+	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a.txt", "content": big, "n": 7, "list": []any{"short", big},
+		"id": int64(9007199254740993)})
+	if got := TrimJSON(raw, 0); !bytes.Equal(got, raw) {
+		t.Fatalf("limit 0 means no limit, got %d bytes", len(got))
+	}
+	got := TrimJSON(raw, 4000)
+	if len(got) > 4000 {
+		t.Fatalf("not bounded: %d", len(got))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(got, &m); err != nil {
+		t.Fatalf("not JSON: %v: %s", err, got)
+	}
+	if m["file_path"] != "/tmp/a.txt" || m["n"] != float64(7) {
+		t.Fatalf("short fields changed: %v", m)
+	}
+	// Numbers keep every digit (2^53+1 does not survive a float64).
+	if !strings.Contains(string(got), `"id":9007199254740993`) {
+		t.Fatalf("number changed: %s", got[:80])
+	}
+	// The kept part is whole runes (a split one would come back as U+FFFD,
+	// which utf8.ValidString accepts) and the marker counts what is gone.
+	content, _ := m["content"].(string)
+	cut := regexp.MustCompile(`^(.*)…\[\+(\d+) bytes\]$`).FindStringSubmatch(content)
+	if !utf8.ValidString(content) || cut == nil || !strings.HasPrefix(cut[1], "가가") || strings.Trim(cut[1], "가") != "" {
+		t.Fatalf("content not cut on a rune boundary with a marker: %.40q", content)
+	}
+	if n, _ := strconv.Atoi(cut[2]); len(cut[1])+n != len(big) {
+		t.Fatalf("marker says %s bytes gone, kept %d of %d", cut[2], len(cut[1]), len(big))
+	}
+	if l, _ := m["list"].([]any); len(l) != 2 || l[0] != "short" {
+		t.Fatalf("list changed: %v", m["list"])
+	}
+	// Not JSON, or not shrinkable: a placeholder string.
+	for _, in := range []json.RawMessage{json.RawMessage(strings.Repeat("x", 200)), json.RawMessage("[" + strings.Repeat("1,", 200) + "1]")} {
+		var s string
+		if err := json.Unmarshal(TrimJSON(in, 100), &s); err != nil || !strings.Contains(s, "bytes") {
+			t.Fatalf("placeholder: %v %q", err, s)
+		}
+	}
+}
+
+// A huge input (a 40 MB attachment, a Write of a whole file) must not hold
+// the write lock for seconds while the trigram index eats it. Indexing time
+// follows the stored size, so the test checks the size: a wall-clock bound
+// failed on GitHub's runners under -race (2.8 s for 1 MB).
+func TestInsertCallBoundsInput(t *testing.T) {
+	s := newMem(t)
+	raw, _ := json.Marshal(map[string]any{"to": "a@b.c", "attachment": strings.Repeat("Zm9v", 1<<20)}) // 4 MB
+	addCall(t, s, "", "send_email", string(raw), "ok")
+	calls, err := s.QueryCalls(context.Background(), CallFilter{Limit: 1})
+	if err != nil || len(calls) != 1 {
+		t.Fatal(err, calls)
+	}
+	// 1 MB as a literal: a larger MaxStoredInput must fail here.
+	if len(calls[0].Input) > 1<<20 {
+		t.Fatalf("stored input %d bytes", len(calls[0].Input))
+	}
+	var m map[string]any
+	if err := json.Unmarshal(calls[0].Input, &m); err != nil || m["to"] != "a@b.c" {
+		t.Fatalf("stored input: %v %v", err, m)
+	}
+	if a, _ := m["attachment"].(string); !strings.HasSuffix(a, " bytes]") {
+		t.Fatalf("attachment not cut: %d bytes", len(a))
+	}
+	// Still searchable by its short fields.
+	if hits, _ := s.QueryCalls(context.Background(), CallFilter{Query: "a@b.c"}); len(hits) != 1 {
+		t.Fatalf("search: %d hits", len(hits))
+	}
+}
+
+// The budget is used, not just respected: a 20 KB string under a 16 KB
+// limit keeps all but a few bytes of it.
+func TestTrimJSONFillsBudget(t *testing.T) {
+	raw, _ := json.Marshal(map[string]any{"file_path": "/tmp/a", "content": strings.Repeat("x", 20000)})
+	got := TrimJSON(raw, DefaultResultLimit)
+	if len(got) > DefaultResultLimit || len(got) < DefaultResultLimit-8 {
+		t.Fatalf("got %d bytes, limit %d", len(got), DefaultResultLimit)
 	}
 }

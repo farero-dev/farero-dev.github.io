@@ -136,7 +136,7 @@ struct DaemonStep: View {
         let registrar = model.registrar
         VStack(alignment: .leading, spacing: 12) {
             Text("farero 데몬").font(.title2.bold())
-            Text("farerod는 로그인 항목으로 백그라운드에서 실행되며 세션 상태, 승인 대기열, 감사 로그를 맡습니다. 앱은 그 화면입니다.")
+            Text("farerod는 로그인 항목으로 백그라운드에서 실행되며 세션 상태, 승인 대기열, 감사 로그를 맡습니다. 앱은 그 화면이고, 승인 카드는 앱이 떠 있어야 보입니다.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if registrar.status == .translocated {
@@ -160,6 +160,7 @@ struct DaemonStep: View {
                 if model.state.isConnected {
                     LabeledContent("데몬 버전") { Text(model.state.daemonVersion) }
                 }
+                OpenAtLoginSection(item: model.openAtLogin)
             }
             .formStyle(.grouped)
             if case .failed(let message) = registrar.status {
@@ -176,6 +177,7 @@ struct DaemonStep: View {
             Button("다시 확인") {
                 registrar.refresh()
                 model.registrationLabel = registrar.status.label
+                model.openAtLogin.refresh()
             }
             Label(Self.keychainGuide, systemImage: "key")
                 .font(.callout)

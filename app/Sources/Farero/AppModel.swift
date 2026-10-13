@@ -46,6 +46,8 @@ final class AppModel {
     @ObservationIgnored let client: IPCClient
     @ObservationIgnored let hotKeys = HotKeyCenter()
     @ObservationIgnored let registrar = DaemonRegistrar()
+    /// 로그인할 때 열기 (Q85). Observable on its own.
+    @ObservationIgnored let openAtLogin = OpenAtLogin()
     @ObservationIgnored var updateTask: Task<Void, Never>?
     @ObservationIgnored var reregistration = ReregistrationState.idle
     @ObservationIgnored var openedPromptURLs: Set<String> = []

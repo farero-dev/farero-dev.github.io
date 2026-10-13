@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,6 +20,14 @@ const (
 	MinResultLimit     = 1 << 10
 	MaxResultLimit     = 1 << 20
 )
+
+// MaxStoredInput is the ceiling InsertCall puts on input_json whatever the
+// caller asked for. The trigram FTS trigger indexes input_json inside the
+// insert, at roughly 0.4 s per MB while holding the write lock; a 40 MB
+// Resend attachment would take about 16 s and other writers (sessions,
+// hook events) would fail with SQLITE_BUSY after busy_timeout (5 s). 1 MB,
+// the largest Q46 result budget, indexes in well under a second.
+const MaxStoredInput = MaxResultLimit
 
 // Log query page sizes.
 const (
@@ -37,13 +47,95 @@ func TruncateUTF8(s string, limit int) string {
 	return s[:cut]
 }
 
-// InsertCall appends an audit log row and returns its id.
+// TrimJSON bounds a tool input that is stored in the log or sent to the
+// app. Up to limit bytes it is returned as is; a limit of 0 or less means
+// no limit. A larger input keeps its
+// structure and loses the tails of its long string values (a Write's
+// content, an attachment's base64), each cut on a rune boundary and marked
+// with how many bytes are gone, so the result is still JSON the app decodes
+// and the short fields (command, file_path) stay intact and searchable.
+// An input that is not valid JSON, or that is too large even with every
+// string emptied, becomes a placeholder string naming its size.
+//
+// The full input is untouched: policy and correlation hash the original,
+// and the upstream tool receives the original.
+func TrimJSON(raw json.RawMessage, limit int) json.RawMessage {
+	if limit <= 0 || len(raw) <= limit {
+		return raw
+	}
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err == nil {
+		// Every string gets the same per-string budget; short values
+		// survive as long as the budget is above their size. Halve it until
+		// the whole thing fits, then search for the largest budget that
+		// still does.
+		fits := func(per int) (json.RawMessage, bool) {
+			out, err := json.Marshal(shrinkStrings(v, per))
+			return out, err == nil && len(out) <= limit
+		}
+		lo, hi := limit, limit
+		best, ok := fits(lo)
+		for !ok {
+			if lo == 0 {
+				return placeholder(len(raw))
+			}
+			hi = lo
+			lo /= 2
+			best, ok = fits(lo)
+		}
+		for lo+1 < hi {
+			mid := (lo + hi) / 2
+			if out, ok := fits(mid); ok {
+				lo, best = mid, out
+			} else {
+				hi = mid
+			}
+		}
+		return best
+	}
+	return placeholder(len(raw))
+}
+
+func placeholder(n int) json.RawMessage {
+	out, _ := json.Marshal(fmt.Sprintf("(입력 %d bytes 생략)", n))
+	return out
+}
+
+func shrinkStrings(v any, per int) any {
+	switch x := v.(type) {
+	case string:
+		if len(x) <= per {
+			return x
+		}
+		cut := TruncateUTF8(x, per)
+		return fmt.Sprintf("%s…[+%d bytes]", cut, len(x)-len(cut))
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = shrinkStrings(e, per)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[k] = shrinkStrings(e, per)
+		}
+		return out
+	}
+	return v
+}
+
+// InsertCall appends an audit log row and returns its id. input_json is
+// bounded by MaxStoredInput (see there); callers apply the user's smaller
+// Q46 budget themselves.
 func (s *Store) InsertCall(ctx context.Context, c model.Call) (int64, error) {
 	var sid any
 	if c.SessionID != "" {
 		sid = c.SessionID
 	}
-	input := string(c.Input)
+	input := string(TrimJSON(c.Input, MaxStoredInput))
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO calls(session_id, conn_id, ts, kind, agent, plugin, tool, input_json, result_text,
 	result_bytes, decision, reason, duration_ms, error)

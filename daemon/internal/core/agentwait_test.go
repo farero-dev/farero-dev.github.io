@@ -8,6 +8,8 @@ import (
 
 	"github.com/farero-dev/farero/daemon/internal/ipc"
 	"github.com/farero-dev/farero/daemon/internal/model"
+	"github.com/farero-dev/farero/daemon/internal/policy"
+	"github.com/farero-dev/farero/daemon/internal/session"
 	"github.com/farero-dev/farero/daemon/internal/store"
 )
 
@@ -67,14 +69,71 @@ func TestTerminalAllowClosesCard(t *testing.T) {
 func TestOtherToolKeepsCard(t *testing.T) {
 	h := newHarness(t, time.Minute)
 	u := h.ui()
-	go h.hook("s1", "PermissionRequest", "Bash", map[string]any{"command": "npm install"}, 100)
+	done := make(chan ipc.Message, 1)
+	go func() {
+		done <- h.hook("s1", "PermissionRequest", "Bash", map[string]any{"command": "npm install"}, 100)
+	}()
 	ap := u.approval()
 	h.hook("s1", "PostToolUse", "Bash", map[string]any{"command": "ls"}, 100)
+	h.hook("s1", "PostToolUse", "Read", map[string]any{"command": "npm install"}, 100)
 	h.hook("s2", "Stop", "", nil, 200)
 	if p := h.core.broker.Pending(); len(p) != 1 || p[0].ID != ap.ID {
 		t.Fatalf("pending: %+v", p)
 	}
+	// The card was still open: the app's answer is the hook's decision.
+	// (Pending alone can miss a settle that is still on its way.)
 	u.answer(ap.ID, model.AnswerAllow)
+	if d, _ := ipc.Decode[ipc.HookDecision](<-done); d.Behavior != ipc.BehaviorAllow {
+		t.Fatalf("decision: %+v", d)
+	}
+}
+
+// settledByAgent waits for the card to go away and the hook to end without
+// a decision, as when the user answered in the terminal.
+func settledByAgent(t *testing.T, u *fakeUI, ap model.Approval, done chan ipc.Message) {
+	t.Helper()
+	if c, _ := ipc.Decode[ipc.ApprovalCancelled](u.next(ipc.TypeApprovalCancelled)); c.ApprovalID != ap.ID {
+		t.Fatalf("cancelled: %+v", c)
+	}
+	if d, _ := ipc.Decode[ipc.HookDecision](<-done); d.Behavior != ipc.BehaviorNone {
+		t.Fatalf("decision: %+v", d)
+	}
+}
+
+// A PostToolUse without a tool_use_id still settles a card whose
+// PreToolUse had one: tool and input match.
+func TestPostToolUseWithoutIDSettlesCard(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	ap, done := h.askBash(u, "toolu_1", "npm test")
+	h.hookRaw(bashEvent("PostToolUse", "", "npm test"), 100)
+	settledByAgent(t, u, ap, done)
+}
+
+// A card whose PreToolUse was not seen is settled by the PostToolUse of the
+// same tool and input, whatever its tool_use_id.
+func TestPostToolUseSettlesCardWithoutPreToolUse(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	done := make(chan ipc.Message, 1)
+	go func() { done <- h.hookRaw(bashEvent("PermissionRequest", "", "npm test"), 100) }()
+	ap := u.approval()
+	h.hookRaw(bashEvent("PostToolUse", "toolu_9", "npm test"), 100)
+	settledByAgent(t, u, ap, done)
+}
+
+// A tool use that ran is forgotten: a later card for the same command is not
+// tied to its old tool_use_id, so the next PostToolUse settles it.
+func TestFinishedToolUseIsForgotten(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	h.hookRaw(bashEvent("PreToolUse", "toolu_1", "npm test"), 100)
+	h.hookRaw(bashEvent("PostToolUse", "toolu_1", "npm test"), 100)
+	done := make(chan ipc.Message, 1)
+	go func() { done <- h.hookRaw(bashEvent("PermissionRequest", "", "npm test"), 100) }()
+	ap := u.approval()
+	h.hookRaw(bashEvent("PostToolUse", "toolu_3", "npm test"), 100)
+	settledByAgent(t, u, ap, done)
 }
 
 // The turn ended (Stop) while a card of the main agent was open: it was
@@ -287,5 +346,44 @@ func TestEarlierToolUseKeepsCard(t *testing.T) {
 	u.answer(ap.ID, model.AnswerAllow)
 	if d, _ := ipc.Decode[ipc.HookDecision](<-done); d.Behavior != ipc.BehaviorAllow {
 		t.Fatalf("decision: %+v", d)
+	}
+}
+
+// The user answered in the terminal while the card was open, and the app's
+// answer arrived after that. Only "allow for this session" still becomes a
+// session grant; allowing once or denying never does, so a late deny in the
+// app cannot turn into a grant for the rest of the session.
+func TestLateAppAnswerGrantsOnlyAllowSession(t *testing.T) {
+	for _, tc := range []struct {
+		answer  string
+		granted bool
+	}{
+		{model.AnswerAllowSession, true},
+		{model.AnswerAllow, false},
+		{model.AnswerDeny, false},
+	} {
+		t.Run(tc.answer, func(t *testing.T) {
+			h := newHarness(t, time.Minute)
+			u := h.ui()
+			h.hook("s1", "SessionStart", "", nil, 100)
+			s, _ := h.core.sessions.Get("claude:s1")
+			input := json.RawMessage(`{"command":"make deploy"}`)
+			in := session.HookInput{SessionID: "s1", HookEventName: "PermissionRequest", ToolName: "Bash", ToolInput: input}
+			w := &agentWait{}
+			w.settled.Store(true) // the terminal answered first
+			done := make(chan ipc.HookDecision, 1)
+			go func() { done <- h.core.decideAgentTool(context.Background(), s, in, w) }()
+			u.answer(u.approval().ID, tc.answer)
+			if d := <-done; d.Behavior != ipc.BehaviorNone {
+				t.Fatalf("decision: %+v", d)
+			}
+			if c := h.lastCall(); c.Decision != model.DecisionCancelled || c.Reason != model.ReasonAnsweredInAgent {
+				t.Fatalf("log: %+v", c)
+			}
+			d := h.core.policy.DecideAgent(policy.AgentCall{SessionID: s.ID, Tool: "Bash", Input: input, UIConnected: true})
+			if granted := d.Outcome == policy.Run; granted != tc.granted {
+				t.Fatalf("granted = %v, want %v (%+v)", granted, tc.granted, d)
+			}
+		})
 	}
 }

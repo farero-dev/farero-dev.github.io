@@ -8,6 +8,7 @@ import (
 	"github.com/farero-dev/farero/daemon/internal/gateway"
 	"github.com/farero-dev/farero/daemon/internal/model"
 	"github.com/farero-dev/farero/daemon/internal/policy"
+	"github.com/farero-dev/farero/daemon/internal/store"
 	"github.com/farero-dev/farero/daemon/internal/upstream"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -122,6 +123,10 @@ func (c *Core) CallTool(ctx context.Context, gc gateway.Call) *mcp.CallToolResul
 // waiting_approval while the card is open; afterwards it shows what its hook
 // events say (running, or waiting_input if the turn ended meanwhile).
 func (c *Core) ask(ctx context.Context, a model.Approval) broker.Result {
+	// The card (approval.request and the state.snapshot of a later UI) gets
+	// a bounded copy of the input; callers keep the full one for the
+	// upstream call and for session grants (Q38).
+	a.Input = store.TrimJSON(a.Input, broadcastApprovalInput)
 	if a.SessionID != "" {
 		logCtx := context.WithoutCancel(ctx)
 		c.sessions.ApprovalOpened(logCtx, a.SessionID)
