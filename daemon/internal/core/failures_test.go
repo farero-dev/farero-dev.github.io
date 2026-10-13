@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/farero-dev/farero/daemon/internal/ipc"
 	"github.com/farero-dev/farero/daemon/internal/model"
+	"github.com/farero-dev/farero/daemon/internal/store"
 	"github.com/farero-dev/farero/daemon/internal/upstream/devplugin"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/unix"
@@ -105,5 +107,70 @@ func TestPluginStatesListOtherConnectors(t *testing.T) {
 	}
 	if want := append(slices.Clone(KnownPlugins), "zzz"); !slices.Equal(got, want) {
 		t.Fatalf("plugins %v, want %v", got, want)
+	}
+}
+
+// disconnectFails is a connector whose sign-out the provider refuses.
+type disconnectFails struct{}
+
+func (disconnectFails) Connect(context.Context, map[string]string, func(ipc.PluginPrompt)) error {
+	return nil
+}
+func (disconnectFails) Disconnect(context.Context) error { return errors.New("revoke failed") }
+
+// App requests report connector and database failures as errors, and an
+// empty log is a list.
+func TestUIRequestErrors(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	h.core.connectors = map[string]Connector{"github": disconnectFails{}, "railway": &optionConnector{}}
+	h.core.Plugins().Set(brokenPlugin{name: "railway"}) // connected: an option change reconnects
+	h.core.HandleUI("test.echo", func(context.Context, ipc.Message) (string, any, error) { return "test.ok", 7, nil })
+	u := h.ui()
+	expect := func(id, typ, data string) {
+		t.Helper()
+		if m := u.reply(id); m.Type != typ || !strings.Contains(string(m.Data), data) {
+			t.Fatalf("%s: %s %s, want %s containing %q", id, m.Type, m.Data, typ, data)
+		}
+	}
+	u.conn.Send(ipc.TypeLogQuery, "q0", store.CallFilter{Query: "nothing here"})
+	expect("q0", ipc.TypeLogResult, "[]")
+	u.conn.Send("test.echo", "e", nil)
+	expect("e", "test.ok", "7")
+	u.conn.Send(ipc.TypePluginDisconnect, "d", ipc.PluginRef{Plugin: "github"})
+	expect("d", ipc.TypeError, "revoke failed")
+	u.conn.Send(ipc.TypePluginSetOption, "o", ipc.PluginSetOption{Plugin: "railway", Key: "k", Value: "v"})
+	expect("o", ipc.TypeError, "not connected")
+
+	h.st.Close()
+	u.conn.Send(ipc.TypeLogQuery, "q1", store.CallFilter{})
+	expect("q1", ipc.TypeError, "")
+	u.conn.Send(ipc.TypePluginDisconnect, "d1", ipc.PluginRef{Plugin: "gmail"})
+	expect("d1", ipc.TypeError, "")
+	u.conn.Send(ipc.TypePluginSetOption, "o1", ipc.PluginSetOption{Plugin: "gmail", Key: "k", Value: "v"})
+	expect("o1", ipc.TypeError, "")
+}
+
+// failingSecrets is a secret store that cannot be read, like a Keychain
+// the user refused.
+type failingSecrets struct{}
+
+func (failingSecrets) Get(string) (string, error) { return "", errors.New("keychain locked") }
+func (failingSecrets) Set(string, string) error   { return errors.New("keychain locked") }
+func (failingSecrets) Delete(string) error        { return nil }
+
+// Without the gateway secret the gateway does not start, and the app is
+// told why.
+func TestGatewaySecretFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, err := New(ctx, Options{Version: "test", Store: memStore(t), Secrets: failingSecrets{}, Table: devTable(), ApprovalTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.StartGateway(ctx); err == nil || !strings.Contains(err.Error(), "keychain locked") {
+		t.Fatalf("start: %v", err)
+	}
+	if gi := c.GatewayInfo(); gi.Running || gi.Error != "gateway secret: keychain locked" {
+		t.Fatalf("gateway info: %+v", gi)
 	}
 }

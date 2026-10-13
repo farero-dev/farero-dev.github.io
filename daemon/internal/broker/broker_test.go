@@ -231,3 +231,20 @@ func TestRespondRemovesOnlyThatRequest(t *testing.T) {
 	}
 	b.DetachUI()
 }
+
+// An answer that is not allow, allow_session or deny is refused and the
+// card stays open.
+func TestRespondRejectsUnknownAnswer(t *testing.T) {
+	n := newRec()
+	b := New(n, time.Minute)
+	b.AttachUI()
+	defer b.DetachUI()
+	go b.Request(context.Background(), model.Approval{Tool: "a"})
+	a := <-n.requested
+	if err := b.Respond(a.ID, "maybe"); err == nil || err.Error() != "bad answer maybe" {
+		t.Fatalf("err = %v", err)
+	}
+	if p := b.Pending(); len(p) != 1 || p[0].ID != a.ID {
+		t.Fatalf("pending: %+v", p)
+	}
+}
