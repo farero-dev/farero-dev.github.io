@@ -47,7 +47,6 @@ func TestDerivedPaths(t *testing.T) {
 	t.Setenv("FARERO_HOME", "/tmp/frp-home")
 	for got, want := range map[string]string{
 		DB():      "/tmp/frp-home/farero.db",
-		Config():  "/tmp/frp-home/config.json",
 		Backups(): "/tmp/frp-home/backups",
 		Secrets(): "/tmp/frp-home/dev-secrets.json",
 	} {

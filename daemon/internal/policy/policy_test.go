@@ -373,3 +373,12 @@ func TestAddPluginToEmptyTable(t *testing.T) {
 		t.Fatalf("lookup: %+v %v", eff, ok)
 	}
 }
+
+// Railway's bucket credentials are asked for (they are secrets) but only
+// read: the annotation says so (F-05, Q36).
+func TestAskedReadToolIsReadOnly(t *testing.T) {
+	eff, ok := NewEngine(DefaultTable(), nil).Lookup("railway", "get-bucket-credentials")
+	if !ok || eff.Level != LevelAsk || !eff.IsReadOnly(eff.DefaultLevel) {
+		t.Fatalf("%+v %v", eff, ok)
+	}
+}

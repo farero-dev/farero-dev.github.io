@@ -1125,3 +1125,25 @@ func TestApprovalResponseReplies(t *testing.T) {
 		t.Fatalf("real card: %+v", m)
 	}
 }
+
+// A session farerod marks unknown (its agent process is gone) loses its
+// grants: a `claude --resume` of the same id asks again (6-2).
+func TestUnknownSessionLosesGrants(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	u := h.ui()
+	a := h.agent("s1", 100)
+	ch := a.callAsync("dev_write_sim", map[string]any{"text": "one"})
+	u.answer(u.approval().ID, model.AnswerAllowSession)
+	<-ch
+	if res := a.call("dev_write_sim", map[string]any{"text": "two"}); res.IsError {
+		t.Fatalf("granted call: %+v", res)
+	}
+	h.core.sessions.SetStatus(context.Background(), "claude:s1", model.StatusUnknown)
+	ch = a.callAsync("dev_write_sim", map[string]any{"text": "three"})
+	ap := u.approval()
+	if ap.SessionID != "claude:s1" {
+		t.Fatalf("approval: %+v", ap)
+	}
+	u.answer(ap.ID, model.AnswerDeny)
+	<-ch
+}

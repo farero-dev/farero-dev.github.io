@@ -109,7 +109,7 @@
         "restart-service": {"level": "ask"},
         "redeploy": {"level": "ask"},
         "set-feature-flag": {"level": "ask"},
-        "get-bucket-credentials": {"level": "ask"},
+        "get-bucket-credentials": {"level": "ask", "read_only": true},
 
         "accept-deploy": {"level": "ask", "no_session": true, "destructive": true},
         "delete-feature-flag": {"level": "ask", "no_session": true, "destructive": true},
