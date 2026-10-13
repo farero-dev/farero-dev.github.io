@@ -48,14 +48,18 @@ func main() {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(logOutput(), &slog.HandlerOptions{Level: level}))
-	if err := run(log, *dev); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, log, *dev); err != nil {
 		log.Error("farerod exiting", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger, dev bool) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+// run starts the daemon and blocks until ctx ends (main cancels it on
+// SIGINT/SIGTERM) or the IPC server fails.
+func run(parent context.Context, log *slog.Logger, dev bool) error {
+	ctx, stop := context.WithCancel(parent)
 	defer stop()
 
 	if err := paths.Ensure(); err != nil {
@@ -99,7 +103,9 @@ func run(log *slog.Logger, dev bool) error {
 	defer os.Remove(paths.Socket())
 	log.Info("farerod started", "version", version, "socket", paths.Socket(), "dev", dev)
 	go c.SweepLoop(ctx)
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		if err := ipc.Serve(ctx, l, c.Serve); err != nil {
 			log.Error("ipc", "err", err)
 			stop()
@@ -121,6 +127,10 @@ func run(log *slog.Logger, dev bool) error {
 	c.BroadcastSnapshot(ctx)
 	go fixAgentPaths(ctx)
 	<-ctx.Done()
+	// Serve closes the listener (which unlinks the socket) once ctx ends;
+	// wait for that so it cannot remove the socket of a daemon started right
+	// after this one.
+	<-serveDone
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	c.Shutdown(sctx)
