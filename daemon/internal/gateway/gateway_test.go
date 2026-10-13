@@ -360,3 +360,15 @@ func TestSetToolsSkipsOnlyTheBadTool(t *testing.T) {
 		}
 	}
 }
+
+// The listener bounds how long a client may take to send its headers, so a
+// slow client cannot hold connections open.
+func TestServerReadHeaderTimeout(t *testing.T) {
+	g, _, _ := start(t)
+	g.mu.Lock()
+	got := g.srv.ReadHeaderTimeout
+	g.mu.Unlock()
+	if got != 10*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %v", got)
+	}
+}

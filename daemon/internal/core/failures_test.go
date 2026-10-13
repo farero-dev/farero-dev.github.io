@@ -174,3 +174,30 @@ func TestGatewaySecretFailure(t *testing.T) {
 		t.Fatalf("gateway info: %+v", gi)
 	}
 }
+
+// deadlinePlugin records the deadline of its tool listing.
+type deadlinePlugin struct {
+	brokenPlugin
+	deadline chan time.Time
+}
+
+func (d deadlinePlugin) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
+	dl, _ := ctx.Deadline()
+	d.deadline <- dl
+	return nil, nil
+}
+
+// A slow upstream cannot hold the app's tool list request: it gets 30
+// seconds.
+func TestPluginToolsDeadline(t *testing.T) {
+	h := newHarness(t, time.Minute)
+	p := deadlinePlugin{brokenPlugin{name: "slow"}, make(chan time.Time, 1)}
+	h.core.Plugins().Set(p)
+	start := time.Now()
+	if _, err := h.core.PluginTools(context.Background(), "slow"); err != nil {
+		t.Fatal(err)
+	}
+	if d := (<-p.deadline).Sub(start); d < 29*time.Second || d > 31*time.Second {
+		t.Fatalf("deadline in %v", d)
+	}
+}
