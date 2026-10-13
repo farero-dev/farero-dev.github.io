@@ -58,11 +58,11 @@ func (r *Railway) setup(ctx context.Context) (*railwaySetup, error) {
 			return rs, nil
 		}
 	}
-	rm, err := auth.FetchResourceMeta(ctx, railwayMCP)
+	rm, err := fetchResourceMeta(ctx, railwayMCP)
 	if err != nil {
 		return nil, err
 	}
-	sm, err := auth.FetchServerMeta(ctx, rm.AuthorizationServers[0])
+	sm, err := fetchServerMeta(ctx, rm.AuthorizationServers[0])
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +99,7 @@ func registerClient(ctx context.Context, endpoint string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -132,7 +132,7 @@ func (r *Railway) Connect(ctx context.Context, _ map[string]string, prompt func(
 		return wrap("railway", err)
 	}
 	cfg := r.config(s)
-	tok, err := auth.LoopbackFlow(ctx, cfg, "/callback", toIPCPrompt(prompt), auth.Resource(s.Resource))
+	tok, err := loopbackFlow(ctx, cfg, "/callback", toIPCPrompt(prompt), auth.Resource(s.Resource))
 	if err != nil {
 		return wrap("railway", err)
 	}

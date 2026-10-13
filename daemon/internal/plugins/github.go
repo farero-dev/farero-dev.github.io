@@ -17,10 +17,16 @@ import (
 // GitHub endpoints. The remote MCP server accepts the OAuth App's device
 // flow token as a Bearer token (M0-4, 검증 결과 9장).
 const (
-	githubMCP      = "https://api.githubcopilot.com/mcp/"
 	githubToolsets = "context,repos,issues,pull_requests,users"
 	// githubReadOnlyHeader lists only read tools (docs/remote-server.md).
 	githubReadOnlyHeader = "X-MCP-Readonly"
+)
+
+// githubMCP and githubUserURL are variables so tests can point them at a
+// local server.
+var (
+	githubMCP     = "https://api.githubcopilot.com/mcp/"
+	githubUserURL = "https://api.github.com/user"
 )
 
 var githubEndpoint = oauth2.Endpoint{
@@ -52,7 +58,7 @@ func (g *GitHub) Connect(ctx context.Context, _ map[string]string, prompt func(i
 	if err != nil {
 		return err
 	}
-	tok, err := auth.DeviceFlow(ctx, cfg, toIPCPrompt(prompt))
+	tok, err := deviceFlow(ctx, cfg, toIPCPrompt(prompt))
 	if err != nil {
 		return wrap("github", err)
 	}
@@ -102,10 +108,10 @@ func (g *GitHub) plugin(ctx context.Context, cfg *oauth2.Config, tok *oauth2.Tok
 func githubLogin(ctx context.Context, token string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, githubUserURL, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
