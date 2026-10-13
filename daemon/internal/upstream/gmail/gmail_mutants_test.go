@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // The clamp in search: 0, negative and above 50 fall back to 10; 1 and 50
@@ -143,5 +145,36 @@ func TestUpstreamTruncate(t *testing.T) {
 		if got := upstreamTruncate(tc.s, tc.n); got != tc.want {
 			t.Errorf("upstreamTruncate(%q, %d) = %q, want %q", tc.s, tc.n, got, tc.want)
 		}
+	}
+}
+
+// New talks to the Gmail API with the given client.
+func TestNewUsesGmailAPI(t *testing.T) {
+	c := &http.Client{}
+	if p := New(c); p.client != c || p.base != apiBase {
+		t.Fatalf("%+v", p)
+	}
+}
+
+// Arguments that are not JSON become a tool error, not a failed call.
+func TestCallToolBadInput(t *testing.T) {
+	p := fakeAPI(t)
+	res, err := p.CallTool(context.Background(), "search_messages", json.RawMessage(`{"query":`))
+	if err != nil || !res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "잘못된 입력") {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// Email reads the account address from the profile.
+func TestEmail(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/profile", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"emailAddress": "me@example.com"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	p := &Plugin{client: srv.Client(), base: srv.URL}
+	if got, err := p.Email(context.Background()); err != nil || got != "me@example.com" {
+		t.Fatalf("%q %v", got, err)
 	}
 }

@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -47,5 +48,28 @@ func TestRegistryClosesReplacedAndRemoved(t *testing.T) {
 	}
 	if _, ok := r.Get("github"); ok {
 		t.Fatal("still registered")
+	}
+}
+
+// All lists the plugins by name.
+func TestRegistryAllSorted(t *testing.T) {
+	r := NewRegistry()
+	for _, n := range []string{"resend", "github", "railway"} {
+		r.Set(&closeCount{name: n})
+	}
+	var got []string
+	for _, p := range r.All() {
+		got = append(got, p.Name())
+	}
+	if strings.Join(got, ",") != "github,railway,resend" {
+		t.Fatalf("all: %v", got)
+	}
+}
+
+// ErrorResult is a tool error the model can read.
+func TestErrorResult(t *testing.T) {
+	r := ErrorResult("denied by the user")
+	if !r.IsError || len(r.Content) != 1 || r.Content[0].(*mcp.TextContent).Text != "denied by the user" {
+		t.Fatalf("%+v", r)
 	}
 }

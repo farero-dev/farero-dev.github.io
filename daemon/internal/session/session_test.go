@@ -547,3 +547,15 @@ func TestTurnStopped(t *testing.T) {
 		t.Fatalf("ended: %s", s.Status)
 	}
 }
+
+// A turn that runs without a tool (the model is thinking) also goes back
+// to waiting for input when the user stops it.
+func TestTurnStoppedWithoutTool(t *testing.T) {
+	m, _, _ := newManager(t)
+	ctx := context.Background()
+	m.Apply(ctx, model.AgentClaude, ev(EventUserPromptSubmit, ""), "", 0)
+	m.TurnStopped(ctx, "claude:s1")
+	if s, _ := m.Get("claude:s1"); s.Status != model.StatusWaitingInput {
+		t.Fatalf("status: %s", s.Status)
+	}
+}

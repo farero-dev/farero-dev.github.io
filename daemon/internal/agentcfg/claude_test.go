@@ -694,3 +694,21 @@ func TestConcurrentWritesKeepValidJSON(t *testing.T) {
 		t.Fatalf("invalid JSON: %v\n%s", err, b)
 	}
 }
+
+// An event whose hook list cannot be read counts as not installed, and the
+// events after it are still checked.
+func TestHooksStateSkipsUnreadableEvent(t *testing.T) {
+	c, _ := setup(t, userSettings)
+	if _, err := c.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	o := mustParse(t, readFile(t, c.settingsPath()))
+	hooks, _ := o.child("hooks")
+	hooks.set(hookEvents[0], json.RawMessage(`"not a list"`))
+	o.set("hooks", mustRaw(hooks))
+	c.HookPath = "/Users/me/Applications/Farero.app/Contents/MacOS/farero-hook"
+	installed, present, stale := c.hooksState(o)
+	if installed || !present || !stale {
+		t.Fatalf("installed=%v present=%v stale=%v", installed, present, stale)
+	}
+}

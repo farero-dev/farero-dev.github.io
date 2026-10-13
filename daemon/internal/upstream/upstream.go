@@ -5,7 +5,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -72,7 +72,7 @@ func (r *Registry) All() []Plugin {
 	for _, p := range r.plugins {
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	slices.SortFunc(out, func(a, b Plugin) int { return strings.Compare(a.Name(), b.Name()) })
 	return out
 }
 
