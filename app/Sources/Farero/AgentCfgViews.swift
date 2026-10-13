@@ -157,7 +157,7 @@ struct AgentCfgPanel: View {
                     Task { await model.preparePlan() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.status?.cliFound != true || model.busy || model.registrationBlocked)
+                .disabled(model.status?.cliFound != true || model.status?.versionTooOld == true || model.busy || model.registrationBlocked)
             }
         }
         .task {
