@@ -11,8 +11,10 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// resendMCP is a variable so tests can point it at a local server.
+var resendMCP = "https://mcp.resend.com/mcp"
+
 const (
-	resendMCP = "https://mcp.resend.com/mcp"
 	// resendClientID is farero's Client ID Metadata Document, served by the
 	// project's GitHub Pages (Q68). It is the client_id, so it must never
 	// change. The document is oauth/client-metadata.json in this repo.
@@ -38,11 +40,11 @@ func (r *Resend) setup(ctx context.Context) (*resendSetup, error) {
 			return &rs, nil
 		}
 	}
-	rm, err := auth.FetchResourceMeta(ctx, resendMCP)
+	rm, err := fetchResourceMeta(ctx, resendMCP)
 	if err != nil {
 		return nil, err
 	}
-	sm, err := auth.FetchServerMeta(ctx, rm.AuthorizationServers[0])
+	sm, err := fetchServerMeta(ctx, rm.AuthorizationServers[0])
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +71,7 @@ func (r *Resend) Connect(ctx context.Context, _ map[string]string, prompt func(i
 	if err != nil {
 		return wrap("resend", err)
 	}
-	tok, err := auth.LoopbackFlow(ctx, r.config(s), "/callback", toIPCPrompt(prompt), auth.Resource(s.Resource))
+	tok, err := loopbackFlow(ctx, r.config(s), "/callback", toIPCPrompt(prompt), auth.Resource(s.Resource))
 	if err != nil {
 		return wrap("resend", err)
 	}

@@ -53,7 +53,7 @@ func (g *Gmail) Connect(ctx context.Context, params map[string]string, prompt fu
 		return errors.New("gmail: GCP OAuth 클라이언트 ID를 입력해야 함")
 	}
 	cfg := g.config(c)
-	tok, err := auth.LoopbackFlow(ctx, cfg, "/callback", toIPCPrompt(prompt),
+	tok, err := loopbackFlow(ctx, cfg, "/callback", toIPCPrompt(prompt),
 		oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 	if err != nil {
 		return wrap("gmail", err)
